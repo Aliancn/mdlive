@@ -24,8 +24,8 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/fswatcher/fswatcher"
 	"github.com/k1LoW/donegroup"
-	"github.com/k1LoW/mo/internal/static"
-	"github.com/k1LoW/mo/version"
+	"github.com/Aliancn/mdlive/internal/static"
+	"github.com/Aliancn/mdlive/version"
 	"golang.org/x/text/collate"
 	"golang.org/x/text/language"
 )

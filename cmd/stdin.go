@@ -12,7 +12,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/k1LoW/mo/internal/server"
+	"github.com/Aliancn/mdlive/internal/server"
 )
 
 // isStdinRedirected reports whether stdin is redirected (not a terminal).

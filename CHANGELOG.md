@@ -1,438 +1,438 @@
 # Changelog
 
-## [v1.6.8](https://github.com/k1LoW/mo/compare/v1.6.7...v1.6.8) - 2026-09-07
+## [v1.6.8](https://github.com/Aliancn/mdlive/compare/v1.6.7...v1.6.8) - 2026-09-07
 
 ### New Features 🎉
-- fix(server): follow symlink directories in recursive patterns by @conao3 in https://github.com/k1LoW/mo/pull/275
+- fix(server): follow symlink directories in recursive patterns by @conao3 in https://github.com/Aliancn/mdlive/pull/275
 ### Fix bug 🐛
-- Fix cross-platform path separator in file tree by @tobiashochguertel in https://github.com/k1LoW/mo/pull/272
-- fix(server): correct watch and pattern bookkeeping around symlink aliases by @k1LoW in https://github.com/k1LoW/mo/pull/280
+- Fix cross-platform path separator in file tree by @tobiashochguertel in https://github.com/Aliancn/mdlive/pull/272
+- fix(server): correct watch and pattern bookkeeping around symlink aliases by @k1LoW in https://github.com/Aliancn/mdlive/pull/280
 ### Dependency Updates ⬆️
-- chore(deps): bump mermaid from 11.16.0 to 11.16.1 in /internal/frontend by @dependabot[bot] in https://github.com/k1LoW/mo/pull/266
-- chore(deps): bump the dependencies group in /internal/frontend with 12 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/265
-- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/264
-- chore(deps): bump the dependencies group across 1 directory with 15 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/278
-- chore(deps): bump golang.org/x/text from 0.40.0 to 0.41.0 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/269
-- chore(deps): bump Songmu/tagpr from 1.20.1 to 1.20.2 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/277
+- chore(deps): bump mermaid from 11.16.0 to 11.16.1 in /internal/frontend by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/266
+- chore(deps): bump the dependencies group in /internal/frontend with 12 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/265
+- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/264
+- chore(deps): bump the dependencies group across 1 directory with 15 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/278
+- chore(deps): bump golang.org/x/text from 0.40.0 to 0.41.0 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/269
+- chore(deps): bump Songmu/tagpr from 1.20.1 to 1.20.2 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/277
 ### Other Changes
-- feat(server): return path segments for the file tree, keep path OS-native by @k1LoW in https://github.com/k1LoW/mo/pull/281
-- ci: run tests on windows-latest by @ShortArrow in https://github.com/k1LoW/mo/pull/279
+- feat(server): return path segments for the file tree, keep path OS-native by @k1LoW in https://github.com/Aliancn/mdlive/pull/281
+- ci: run tests on windows-latest by @ShortArrow in https://github.com/Aliancn/mdlive/pull/279
 
-## [v1.6.7](https://github.com/k1LoW/mo/compare/v1.6.6...v1.6.7) - 2026-08-03
-
-### Fix bug 🐛
-- fix(frontend): flip file context menu upward when it would overflow the viewport bottom by @matsuyoshi30 in https://github.com/k1LoW/mo/pull/262
-### Dependency Updates ⬆️
-- chore(deps): bump actions/checkout from 7.0.0 to 7.0.1 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/258
-- chore(deps): bump the dependencies group across 1 directory with 9 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/261
-
-## [v1.6.6](https://github.com/k1LoW/mo/compare/v1.6.5...v1.6.6) - 2026-07-22
+## [v1.6.7](https://github.com/Aliancn/mdlive/compare/v1.6.6...v1.6.7) - 2026-08-03
 
 ### Fix bug 🐛
-- Fix background start falsely reporting success when the server fails to start by @kiakiraki in https://github.com/k1LoW/mo/pull/255
-- fix(cmd): count only successful pattern POSTs when adding to a running server by @k1LoW in https://github.com/k1LoW/mo/pull/257
+- fix(frontend): flip file context menu upward when it would overflow the viewport bottom by @matsuyoshi30 in https://github.com/Aliancn/mdlive/pull/262
 ### Dependency Updates ⬆️
-- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/253
-- chore(deps-dev): bump the dependencies group in /internal/frontend with 5 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/254
+- chore(deps): bump actions/checkout from 7.0.0 to 7.0.1 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/258
+- chore(deps): bump the dependencies group across 1 directory with 9 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/261
 
-## [v1.6.5](https://github.com/k1LoW/mo/compare/v1.6.4...v1.6.5) - 2026-07-15
+## [v1.6.6](https://github.com/Aliancn/mdlive/compare/v1.6.5...v1.6.6) - 2026-07-22
 
 ### Fix bug 🐛
-- Fix data race in State.Groups() by deep-copying FileEntry values by @kiakiraki in https://github.com/k1LoW/mo/pull/251
+- Fix background start falsely reporting success when the server fails to start by @kiakiraki in https://github.com/Aliancn/mdlive/pull/255
+- fix(cmd): count only successful pattern POSTs when adding to a running server by @k1LoW in https://github.com/Aliancn/mdlive/pull/257
+### Dependency Updates ⬆️
+- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/253
+- chore(deps-dev): bump the dependencies group in /internal/frontend with 5 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/254
 
-## [v1.6.4](https://github.com/k1LoW/mo/compare/v1.6.3...v1.6.4) - 2026-07-13
+## [v1.6.5](https://github.com/Aliancn/mdlive/compare/v1.6.4...v1.6.5) - 2026-07-15
+
+### Fix bug 🐛
+- Fix data race in State.Groups() by deep-copying FileEntry values by @kiakiraki in https://github.com/Aliancn/mdlive/pull/251
+
+## [v1.6.4](https://github.com/Aliancn/mdlive/compare/v1.6.3...v1.6.4) - 2026-07-13
 
 ### Dependency Updates ⬆️
-- chore(deps): bump the dependencies group across 1 directory with 13 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/248
-- chore(deps): bump golang.org/x/text from 0.38.0 to 0.40.0 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/247
-- chore(deps): bump goreleaser/goreleaser-action from 7.2.2 to 7.2.3 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/245
+- chore(deps): bump the dependencies group across 1 directory with 13 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/248
+- chore(deps): bump golang.org/x/text from 0.38.0 to 0.40.0 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/247
+- chore(deps): bump goreleaser/goreleaser-action from 7.2.2 to 7.2.3 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/245
 ### Other Changes
-- fix(frontend): render base64 data:image URIs in Markdown images by @k1LoW in https://github.com/k1LoW/mo/pull/249
+- fix(frontend): render base64 data:image URIs in Markdown images by @k1LoW in https://github.com/Aliancn/mdlive/pull/249
 
-## [v1.6.3](https://github.com/k1LoW/mo/compare/v1.6.2...v1.6.3) - 2026-06-26
-
-### Fix bug 🐛
-- fix(frontend): make the Mermaid copy-image button work in Chrome/Safari and on HTML-label diagrams by @k1LoW in https://github.com/k1LoW/mo/pull/243
-### Dependency Updates ⬆️
-- chore(deps): bump actions/setup-go from 6.4.0 to 6.5.0 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/242
-
-## [v1.6.2](https://github.com/k1LoW/mo/compare/v1.6.1...v1.6.2) - 2026-06-23
+## [v1.6.3](https://github.com/Aliancn/mdlive/compare/v1.6.2...v1.6.3) - 2026-06-26
 
 ### Fix bug 🐛
-- fix(frontend): increase z-index of `GroupDropdown` not to be concealed by active file label by @kyu08 in https://github.com/k1LoW/mo/pull/239
-### Other Changes
-- feat: hint how to unwatch when an empty group is kept alive by patterns by @k1LoW in https://github.com/k1LoW/mo/pull/241
+- fix(frontend): make the Mermaid copy-image button work in Chrome/Safari and on HTML-label diagrams by @k1LoW in https://github.com/Aliancn/mdlive/pull/243
+### Dependency Updates ⬆️
+- chore(deps): bump actions/setup-go from 6.4.0 to 6.5.0 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/242
 
-## [v1.6.1](https://github.com/k1LoW/mo/compare/v1.6.0...v1.6.1) - 2026-06-22
+## [v1.6.2](https://github.com/Aliancn/mdlive/compare/v1.6.1...v1.6.2) - 2026-06-23
+
+### Fix bug 🐛
+- fix(frontend): increase z-index of `GroupDropdown` not to be concealed by active file label by @kyu08 in https://github.com/Aliancn/mdlive/pull/239
+### Other Changes
+- feat: hint how to unwatch when an empty group is kept alive by patterns by @k1LoW in https://github.com/Aliancn/mdlive/pull/241
+
+## [v1.6.1](https://github.com/Aliancn/mdlive/compare/v1.6.0...v1.6.1) - 2026-06-22
 
 ### Dependency Updates ⬆️
-- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/234
-- chore(deps-dev): bump the dependencies group in /internal/frontend with 7 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/235
+- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/234
+- chore(deps-dev): bump the dependencies group in /internal/frontend with 7 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/235
 ### Other Changes
-- fix(deps): bump vulnerable frontend dependencies by @k1LoW in https://github.com/k1LoW/mo/pull/237
+- fix(deps): bump vulnerable frontend dependencies by @k1LoW in https://github.com/Aliancn/mdlive/pull/237
 
-## [v1.6.0](https://github.com/k1LoW/mo/compare/v1.5.6...v1.6.0) - 2026-06-18
+## [v1.6.0](https://github.com/Aliancn/mdlive/compare/v1.5.6...v1.6.0) - 2026-06-18
 
 ### New Features 🎉
-- feat(frontend): reveal active file label as a sticky bar on scroll by @k1LoW in https://github.com/k1LoW/mo/pull/232
-- feat(frontend): show active file name in header by @kyu08 in https://github.com/k1LoW/mo/pull/224
-- feat(frontend): open relative links in a new tab on modifier-click by @k1LoW in https://github.com/k1LoW/mo/pull/233
+- feat(frontend): reveal active file label as a sticky bar on scroll by @k1LoW in https://github.com/Aliancn/mdlive/pull/232
+- feat(frontend): show active file name in header by @kyu08 in https://github.com/Aliancn/mdlive/pull/224
+- feat(frontend): open relative links in a new tab on modifier-click by @k1LoW in https://github.com/Aliancn/mdlive/pull/233
 ### Dependency Updates ⬆️
-- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/225
-- chore(deps): bump the dependencies group in /internal/frontend with 10 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/226
-- chore(deps-dev): bump the dependencies group in /internal/frontend with 3 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/229
-- chore(deps): bump golang.org/x/text from 0.37.0 to 0.38.0 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/228
+- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/225
+- chore(deps): bump the dependencies group in /internal/frontend with 10 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/226
+- chore(deps-dev): bump the dependencies group in /internal/frontend with 3 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/229
+- chore(deps): bump golang.org/x/text from 0.37.0 to 0.38.0 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/228
 ### Other Changes
-- migrate gofsnotify/fsnotify to fswatcher/fswatcher by @shogo82148 in https://github.com/k1LoW/mo/pull/231
+- migrate gofsnotify/fsnotify to fswatcher/fswatcher by @shogo82148 in https://github.com/Aliancn/mdlive/pull/231
 
-## [v1.5.6](https://github.com/k1LoW/mo/compare/v1.5.5...v1.5.6) - 2026-06-04
+## [v1.5.6](https://github.com/Aliancn/mdlive/compare/v1.5.5...v1.5.6) - 2026-06-04
 ### Dependency Updates ⬆️
-- chore(deps): bump the dependencies group in /internal/frontend with 10 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/214
-- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/212
-- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/213
-- chore(deps): bump goreleaser/goreleaser-action from 7.2.1 to 7.2.2 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/219
-- chore(deps): bump the dependencies group in /internal/frontend with 9 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/220
-- chore(deps): bump the dependencies group in /internal/frontend with 3 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/221
+- chore(deps): bump the dependencies group in /internal/frontend with 10 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/214
+- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/212
+- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/213
+- chore(deps): bump goreleaser/goreleaser-action from 7.2.1 to 7.2.2 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/219
+- chore(deps): bump the dependencies group in /internal/frontend with 9 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/220
+- chore(deps): bump the dependencies group in /internal/frontend with 3 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/221
 ### Other Changes
-- Fix raw asset path boundary by @mattn in https://github.com/k1LoW/mo/pull/222
-- docs(security): clarify threat model for local HTTP server by @k1LoW in https://github.com/k1LoW/mo/pull/223
+- Fix raw asset path boundary by @mattn in https://github.com/Aliancn/mdlive/pull/222
+- docs(security): clarify threat model for local HTTP server by @k1LoW in https://github.com/Aliancn/mdlive/pull/223
 
-## [v1.5.5](https://github.com/k1LoW/mo/compare/v1.5.4...v1.5.5) - 2026-05-11
+## [v1.5.5](https://github.com/Aliancn/mdlive/compare/v1.5.4...v1.5.5) - 2026-05-11
 ### Dependency Updates ⬆️
-- chore(deps): bump mermaid from 11.14.0 to 11.15.0 in /internal/frontend by @dependabot[bot] in https://github.com/k1LoW/mo/pull/210
+- chore(deps): bump mermaid from 11.14.0 to 11.15.0 in /internal/frontend by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/210
 
-## [v1.5.4](https://github.com/k1LoW/mo/compare/v1.5.3...v1.5.4) - 2026-05-08
+## [v1.5.4](https://github.com/Aliancn/mdlive/compare/v1.5.3...v1.5.4) - 2026-05-08
 ### Fix bug 🐛
-- fix: keep watched files on coalesced rename flags from FSEvents by @k1LoW in https://github.com/k1LoW/mo/pull/209
+- fix: keep watched files on coalesced rename flags from FSEvents by @k1LoW in https://github.com/Aliancn/mdlive/pull/209
 ### Dependency Updates ⬆️
-- chore(deps): bump pnpm/action-setup from 6.0.4 to 6.0.5 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/206
-- chore(deps): bump the dependencies group in /internal/frontend with 5 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/207
+- chore(deps): bump pnpm/action-setup from 6.0.4 to 6.0.5 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/206
+- chore(deps): bump the dependencies group in /internal/frontend with 5 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/207
 
-## [v1.5.3](https://github.com/k1LoW/mo/compare/v1.5.2...v1.5.3) - 2026-05-07
+## [v1.5.3](https://github.com/Aliancn/mdlive/compare/v1.5.2...v1.5.3) - 2026-05-07
 ### Other Changes
-- chore: migrate from fsnotify/fsnotify to gofsnotify/fsnotify by @k1LoW in https://github.com/k1LoW/mo/pull/204
+- chore: migrate from fsnotify/fsnotify to gofsnotify/fsnotify by @k1LoW in https://github.com/Aliancn/mdlive/pull/204
 
-## [v1.5.2](https://github.com/k1LoW/mo/compare/v1.5.1...v1.5.2) - 2026-05-05
+## [v1.5.2](https://github.com/Aliancn/mdlive/compare/v1.5.1...v1.5.2) - 2026-05-05
 ### Other Changes
-- fix: apply color-scheme dark to root dark theme selector by @Coiggahou2002 in https://github.com/k1LoW/mo/pull/201
-- refactor(frontend): hoist color-scheme to root theme selectors by @k1LoW in https://github.com/k1LoW/mo/pull/203
+- fix: apply color-scheme dark to root dark theme selector by @Coiggahou2002 in https://github.com/Aliancn/mdlive/pull/201
+- refactor(frontend): hoist color-scheme to root theme selectors by @k1LoW in https://github.com/Aliancn/mdlive/pull/203
 
-## [v1.5.1](https://github.com/k1LoW/mo/compare/v1.5.0...v1.5.1) - 2026-04-30
+## [v1.5.1](https://github.com/Aliancn/mdlive/compare/v1.5.0...v1.5.1) - 2026-04-30
 ### New Features 🎉
-- fix: drop missing files from state when content fetch hits ENOENT by @k1LoW in https://github.com/k1LoW/mo/pull/196
+- fix: drop missing files from state when content fetch hits ENOENT by @k1LoW in https://github.com/Aliancn/mdlive/pull/196
 ### Dependency Updates ⬆️
-- chore(deps): bump the dependencies group with 3 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/199
-- chore(deps): bump github.com/fsnotify/fsnotify from 1.9.0 to 1.10.0 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/198
-- chore(deps-dev): bump the dependencies group in /internal/frontend with 3 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/200
+- chore(deps): bump the dependencies group with 3 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/199
+- chore(deps): bump github.com/fsnotify/fsnotify from 1.9.0 to 1.10.0 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/198
+- chore(deps-dev): bump the dependencies group in /internal/frontend with 3 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/200
 
-## [v1.5.0](https://github.com/k1LoW/mo/compare/v1.4.1...v1.5.0) - 2026-04-30
+## [v1.5.0](https://github.com/Aliancn/mdlive/compare/v1.4.1...v1.5.0) - 2026-04-30
 ### New Features 🎉
-- fix(frontend): sync URL with active file across all selection paths by @kechol in https://github.com/k1LoW/mo/pull/193
-- fix(frontend): use <a> for file/heading navigation by @kechol in https://github.com/k1LoW/mo/pull/194
+- fix(frontend): sync URL with active file across all selection paths by @kechol in https://github.com/Aliancn/mdlive/pull/193
+- fix(frontend): use <a> for file/heading navigation by @kechol in https://github.com/Aliancn/mdlive/pull/194
 
-## [v1.4.1](https://github.com/k1LoW/mo/compare/v1.4.0...v1.4.1) - 2026-04-27
+## [v1.4.1](https://github.com/Aliancn/mdlive/compare/v1.4.0...v1.4.1) - 2026-04-27
 ### Dependency Updates ⬆️
-- chore(deps-dev): bump the dependencies group in /internal/frontend with 8 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/189
-- chore(deps): bump the dependencies group with 4 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/188
+- chore(deps-dev): bump the dependencies group in /internal/frontend with 8 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/189
+- chore(deps): bump the dependencies group with 4 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/188
 ### Other Changes
-- feat: add @media print styles for better print preview by @k1LoW in https://github.com/k1LoW/mo/pull/192
+- feat: add @media print styles for better print preview by @k1LoW in https://github.com/Aliancn/mdlive/pull/192
 
-## [v1.4.0](https://github.com/k1LoW/mo/compare/v1.3.0...v1.4.0) - 2026-04-22
+## [v1.4.0](https://github.com/Aliancn/mdlive/compare/v1.3.0...v1.4.0) - 2026-04-22
 ### Breaking Changes 🛠
-- feat: add --recursive (-R) flag and reshape --watch as a boolean toggle by @kechol in https://github.com/k1LoW/mo/pull/184
-- feat: reshape --unwatch as a boolean flag with positional pattern arguments by @k1LoW in https://github.com/k1LoW/mo/pull/186
+- feat: add --recursive (-R) flag and reshape --watch as a boolean toggle by @kechol in https://github.com/Aliancn/mdlive/pull/184
+- feat: reshape --unwatch as a boolean flag with positional pattern arguments by @k1LoW in https://github.com/Aliancn/mdlive/pull/186
 ### New Features 🎉
-- fix: sort file lists in natural order (x/text/collate variant) by @kechol in https://github.com/k1LoW/mo/pull/183
+- fix: sort file lists in natural order (x/text/collate variant) by @kechol in https://github.com/Aliancn/mdlive/pull/183
 ### Dependency Updates ⬆️
-- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/180
-- chore(deps-dev): bump the dependencies group in /internal/frontend with 2 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/181
+- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/180
+- chore(deps-dev): bump the dependencies group in /internal/frontend with 2 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/181
 ### Other Changes
-- feat: make `<code>` element brighter in dark mode by @kyu08 in https://github.com/k1LoW/mo/pull/182
+- feat: make `<code>` element brighter in dark mode by @kyu08 in https://github.com/Aliancn/mdlive/pull/182
 
-## [v1.3.0](https://github.com/k1LoW/mo/compare/v1.2.0...v1.3.0) - 2026-04-15
+## [v1.3.0](https://github.com/Aliancn/mdlive/compare/v1.2.0...v1.3.0) - 2026-04-15
 ### New Features 🎉
-- feat: fix the position of file menu by @kyu08 in https://github.com/k1LoW/mo/pull/176
+- feat: fix the position of file menu by @kyu08 in https://github.com/Aliancn/mdlive/pull/176
 
-## [v1.2.0](https://github.com/k1LoW/mo/compare/v1.1.1...v1.2.0) - 2026-04-13
+## [v1.2.0](https://github.com/Aliancn/mdlive/compare/v1.1.1...v1.2.0) - 2026-04-13
 ### New Features 🎉
-- feat: support reading Markdown from stdin pipe by @k1LoW in https://github.com/k1LoW/mo/pull/174
-- [codex] Add content font size toggle by @agata in https://github.com/k1LoW/mo/pull/171
+- feat: support reading Markdown from stdin pipe by @k1LoW in https://github.com/Aliancn/mdlive/pull/174
+- [codex] Add content font size toggle by @agata in https://github.com/Aliancn/mdlive/pull/171
 
-## [v1.1.1](https://github.com/k1LoW/mo/compare/v1.1.0...v1.1.1) - 2026-04-13
+## [v1.1.1](https://github.com/Aliancn/mdlive/compare/v1.1.0...v1.1.1) - 2026-04-13
 ### Fix bug 🐛
-- fix: decode percent-encoded non-ASCII paths in relative link handler by @k1LoW in https://github.com/k1LoW/mo/pull/173
+- fix: decode percent-encoded non-ASCII paths in relative link handler by @k1LoW in https://github.com/Aliancn/mdlive/pull/173
 ### Dependency Updates ⬆️
-- chore(deps): bump Songmu/tagpr from 1.17.1 to 1.18.1 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/168
-- chore(deps): bump the dependencies group in /internal/frontend with 11 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/169
+- chore(deps): bump Songmu/tagpr from 1.17.1 to 1.18.1 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/168
+- chore(deps): bump the dependencies group in /internal/frontend with 11 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/169
 
-## [v1.1.0](https://github.com/k1LoW/mo/compare/v1.0.0...v1.1.0) - 2026-04-09
+## [v1.1.0](https://github.com/Aliancn/mdlive/compare/v1.0.0...v1.1.0) - 2026-04-09
 ### Breaking Changes 🛠
-- refactor: nest file API endpoints under groups path by @k1LoW in https://github.com/k1LoW/mo/pull/167
+- refactor: nest file API endpoints under groups path by @k1LoW in https://github.com/Aliancn/mdlive/pull/167
 ### Dependency Updates ⬆️
-- chore(deps-dev): bump vite from 8.0.3 to 8.0.5 in /internal/frontend by @dependabot[bot] in https://github.com/k1LoW/mo/pull/163
+- chore(deps-dev): bump vite from 8.0.3 to 8.0.5 in /internal/frontend by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/163
 ### Other Changes
-- fix: scope uploaded file dedup check to target group only by @k1LoW in https://github.com/k1LoW/mo/pull/166
+- fix: scope uploaded file dedup check to target group only by @k1LoW in https://github.com/Aliancn/mdlive/pull/166
 
-## [v1.0.0](https://github.com/k1LoW/mo/compare/v0.23.4...v1.0.0) - 2026-04-05
+## [v1.0.0](https://github.com/Aliancn/mdlive/compare/v0.23.4...v1.0.0) - 2026-04-05
 
-## [v0.23.4](https://github.com/k1LoW/mo/compare/v0.23.3...v0.23.4) - 2026-04-04
+## [v0.23.4](https://github.com/Aliancn/mdlive/compare/v0.23.3...v0.23.4) - 2026-04-04
 ### New Features 🎉
-- feat: use distinct icons for Close file and Discard actions by @k1LoW in https://github.com/k1LoW/mo/pull/161
+- feat: use distinct icons for Close file and Discard actions by @k1LoW in https://github.com/Aliancn/mdlive/pull/161
 
-## [v0.23.3](https://github.com/k1LoW/mo/compare/v0.23.2...v0.23.3) - 2026-04-03
+## [v0.23.3](https://github.com/Aliancn/mdlive/compare/v0.23.2...v0.23.3) - 2026-04-03
 ### Dependency Updates ⬆️
-- chore(deps): bump actions/setup-go from 6.3.0 to 6.4.0 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/157
-- chore(deps): bump the dependencies group in /internal/frontend with 5 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/158
+- chore(deps): bump actions/setup-go from 6.3.0 to 6.4.0 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/157
+- chore(deps): bump the dependencies group in /internal/frontend with 5 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/158
 
-## [v0.23.2](https://github.com/k1LoW/mo/compare/v0.23.1...v0.23.2) - 2026-03-31
+## [v0.23.2](https://github.com/Aliancn/mdlive/compare/v0.23.1...v0.23.2) - 2026-03-31
 ### Fix bug 🐛
-- feat: add smooth scroll for footnote references by @k1LoW in https://github.com/k1LoW/mo/pull/156
+- feat: add smooth scroll for footnote references by @k1LoW in https://github.com/Aliancn/mdlive/pull/156
 
-## [v0.23.1](https://github.com/k1LoW/mo/compare/v0.23.0...v0.23.1) - 2026-03-28
+## [v0.23.1](https://github.com/Aliancn/mdlive/compare/v0.23.0...v0.23.1) - 2026-03-28
 ### Other Changes
-- fix: open sidebar when search is activated by @k1LoW in https://github.com/k1LoW/mo/pull/152
+- fix: open sidebar when search is activated by @k1LoW in https://github.com/Aliancn/mdlive/pull/152
 
-## [v0.23.0](https://github.com/k1LoW/mo/compare/v0.22.1...v0.23.0) - 2026-03-28
+## [v0.23.0](https://github.com/Aliancn/mdlive/compare/v0.22.1...v0.23.0) - 2026-03-28
 ### New Features 🎉
-- feat: add full-text search results by @k1LoW in https://github.com/k1LoW/mo/pull/149
-- chore: change page title format by @syumai in https://github.com/k1LoW/mo/pull/151
+- feat: add full-text search results by @k1LoW in https://github.com/Aliancn/mdlive/pull/149
+- chore: change page title format by @syumai in https://github.com/Aliancn/mdlive/pull/151
 
-## [v0.22.1](https://github.com/k1LoW/mo/compare/v0.22.0...v0.22.1) - 2026-03-27
+## [v0.22.1](https://github.com/Aliancn/mdlive/compare/v0.22.0...v0.22.1) - 2026-03-27
 ### Fix bug 🐛
-- fix: Enable overscroll containment for Sidebar and TocPanel components by @orangekame3 in https://github.com/k1LoW/mo/pull/147
+- fix: Enable overscroll containment for Sidebar and TocPanel components by @orangekame3 in https://github.com/Aliancn/mdlive/pull/147
 ### Dependency Updates ⬆️
-- chore(deps): bump the dependencies group in /internal/frontend with 8 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/145
+- chore(deps): bump the dependencies group in /internal/frontend with 8 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/145
 
-## [v0.22.0](https://github.com/k1LoW/mo/compare/v0.21.0...v0.22.0) - 2026-03-26
+## [v0.22.0](https://github.com/Aliancn/mdlive/compare/v0.21.0...v0.22.0) - 2026-03-26
 ### New Features 🎉
-- feat: add "Copy link" to file context menu by @k1LoW in https://github.com/k1LoW/mo/pull/140
-- feat: persist TOC open/closed state per file in localStorage by @k1LoW in https://github.com/k1LoW/mo/pull/143
+- feat: add "Copy link" to file context menu by @k1LoW in https://github.com/Aliancn/mdlive/pull/140
+- feat: persist TOC open/closed state per file in localStorage by @k1LoW in https://github.com/Aliancn/mdlive/pull/143
 
-## [v0.21.0](https://github.com/k1LoW/mo/compare/v0.20.2...v0.21.0) - 2026-03-24
+## [v0.21.0](https://github.com/Aliancn/mdlive/compare/v0.20.2...v0.21.0) - 2026-03-24
 ### Breaking Changes 🛠
-- feat: support directory arguments to open .md files inside by @k1LoW in https://github.com/k1LoW/mo/pull/137
+- feat: support directory arguments to open .md files inside by @k1LoW in https://github.com/Aliancn/mdlive/pull/137
 ### New Features 🎉
-- feat: add fullscreen zoom modal for images and Mermaid diagrams by @harakeishi in https://github.com/k1LoW/mo/pull/135
+- feat: add fullscreen zoom modal for images and Mermaid diagrams by @harakeishi in https://github.com/Aliancn/mdlive/pull/135
 
-## [v0.20.2](https://github.com/k1LoW/mo/compare/v0.20.1...v0.20.2) - 2026-03-22
+## [v0.20.2](https://github.com/Aliancn/mdlive/compare/v0.20.1...v0.20.2) - 2026-03-22
 ### Other Changes
-- fix: prevent scroll chaining on content area by @orangekame3 in https://github.com/k1LoW/mo/pull/133
+- fix: prevent scroll chaining on content area by @orangekame3 in https://github.com/Aliancn/mdlive/pull/133
 
-## [v0.20.1](https://github.com/k1LoW/mo/compare/v0.20.0...v0.20.1) - 2026-03-20
+## [v0.20.1](https://github.com/Aliancn/mdlive/compare/v0.20.0...v0.20.1) - 2026-03-20
 ### Fix bug 🐛
-- fix: clear running server state when using --clear by @k1LoW in https://github.com/k1LoW/mo/pull/131
+- fix: clear running server state when using --clear by @k1LoW in https://github.com/Aliancn/mdlive/pull/131
 
-## [v0.20.0](https://github.com/k1LoW/mo/compare/v0.19.0...v0.20.0) - 2026-03-20
+## [v0.20.0](https://github.com/Aliancn/mdlive/compare/v0.19.0...v0.20.0) - 2026-03-20
 ### New Features 🎉
-- feat: add --close option to remove files from CLI by @haru0017 in https://github.com/k1LoW/mo/pull/126
+- feat: add --close option to remove files from CLI by @haru0017 in https://github.com/Aliancn/mdlive/pull/126
 ### Dependency Updates ⬆️
-- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/127
-- chore(deps): bump the dependencies group in /internal/frontend with 8 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/128
+- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/127
+- chore(deps): bump the dependencies group in /internal/frontend with 8 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/128
 
-## [v0.19.0](https://github.com/k1LoW/mo/compare/v0.18.5...v0.19.0) - 2026-03-18
+## [v0.19.0](https://github.com/Aliancn/mdlive/compare/v0.18.5...v0.19.0) - 2026-03-18
 ### New Features 🎉
-- feat: add title toggle button for heading titles by @k1LoW in https://github.com/k1LoW/mo/pull/121
-- feat: add Content-Security-Policy header by @k1LoW in https://github.com/k1LoW/mo/pull/125
-- feat: add "Copy absolute path" to file context menu by @harakeishi in https://github.com/k1LoW/mo/pull/123
+- feat: add title toggle button for heading titles by @k1LoW in https://github.com/Aliancn/mdlive/pull/121
+- feat: add Content-Security-Policy header by @k1LoW in https://github.com/Aliancn/mdlive/pull/125
+- feat: add "Copy absolute path" to file context menu by @harakeishi in https://github.com/Aliancn/mdlive/pull/123
 
-## [v0.18.5](https://github.com/k1LoW/mo/compare/v0.18.4...v0.18.5) - 2026-03-18
+## [v0.18.5](https://github.com/Aliancn/mdlive/compare/v0.18.4...v0.18.5) - 2026-03-18
 ### Other Changes
-- docs: add SECURITY.md with vulnerability reporting policy by @k1LoW in https://github.com/k1LoW/mo/pull/119
+- docs: add SECURITY.md with vulnerability reporting policy by @k1LoW in https://github.com/Aliancn/mdlive/pull/119
 
-## [v0.18.4](https://github.com/k1LoW/mo/compare/v0.18.3...v0.18.4) - 2026-03-15
+## [v0.18.4](https://github.com/Aliancn/mdlive/compare/v0.18.3...v0.18.4) - 2026-03-15
 ### Other Changes
-- refactor: apply modernize linter suggestions by @k1LoW in https://github.com/k1LoW/mo/pull/113
-- fix: update undici to 7.24.3 to resolve security vulnerabilities by @k1LoW in https://github.com/k1LoW/mo/pull/115
+- refactor: apply modernize linter suggestions by @k1LoW in https://github.com/Aliancn/mdlive/pull/113
+- fix: update undici to 7.24.3 to resolve security vulnerabilities by @k1LoW in https://github.com/Aliancn/mdlive/pull/115
 
-## [v0.18.3](https://github.com/k1LoW/mo/compare/v0.18.2...v0.18.3) - 2026-03-13
+## [v0.18.3](https://github.com/Aliancn/mdlive/compare/v0.18.2...v0.18.3) - 2026-03-13
 ### Dependency Updates ⬆️
-- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/111
-- chore(deps): bump the dependencies group in /internal/frontend with 10 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/112
+- chore(deps): bump the dependencies group with 2 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/111
+- chore(deps): bump the dependencies group in /internal/frontend with 10 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/112
 ### Other Changes
-- fix: debounce watcher file change events by @k1LoW in https://github.com/k1LoW/mo/pull/109
+- fix: debounce watcher file change events by @k1LoW in https://github.com/Aliancn/mdlive/pull/109
 
-## [v0.18.2](https://github.com/k1LoW/mo/compare/v0.18.1...v0.18.2) - 2026-03-11
+## [v0.18.2](https://github.com/Aliancn/mdlive/compare/v0.18.1...v0.18.2) - 2026-03-11
 ### Other Changes
-- feat: reject binary files in AddFile by @k1LoW in https://github.com/k1LoW/mo/pull/107
-- feat: syntax highlight non-markdown text files with Shiki by @k1LoW in https://github.com/k1LoW/mo/pull/108
+- feat: reject binary files in AddFile by @k1LoW in https://github.com/Aliancn/mdlive/pull/107
+- feat: syntax highlight non-markdown text files with Shiki by @k1LoW in https://github.com/Aliancn/mdlive/pull/108
 
-## [v0.18.1](https://github.com/k1LoW/mo/compare/v0.18.0...v0.18.1) - 2026-03-10
+## [v0.18.1](https://github.com/Aliancn/mdlive/compare/v0.18.0...v0.18.1) - 2026-03-10
 ### Other Changes
-- feat: add --skip-bind-address-confirmation flag to bypass non-loopback bind prompt by @110y in https://github.com/k1LoW/mo/pull/103
-- fix: rename --skip-bind-address-confirmation to --dangerously-allow-remote-access by @k1LoW in https://github.com/k1LoW/mo/pull/105
+- feat: add --skip-bind-address-confirmation flag to bypass non-loopback bind prompt by @110y in https://github.com/Aliancn/mdlive/pull/103
+- fix: rename --skip-bind-address-confirmation to --dangerously-allow-remote-access by @k1LoW in https://github.com/Aliancn/mdlive/pull/105
 
-## [v0.18.0](https://github.com/k1LoW/mo/compare/v0.17.0...v0.18.0) - 2026-03-10
+## [v0.18.0](https://github.com/Aliancn/mdlive/compare/v0.17.0...v0.18.0) - 2026-03-10
 ### New Features 🎉
-- feat: add wide/narrow layout toggle by @k1LoW in https://github.com/k1LoW/mo/pull/101
+- feat: add wide/narrow layout toggle by @k1LoW in https://github.com/Aliancn/mdlive/pull/101
 ### Other Changes
-- fix: add accessibility attributes to all toggle buttons by @k1LoW in https://github.com/k1LoW/mo/pull/102
+- fix: add accessibility attributes to all toggle buttons by @k1LoW in https://github.com/Aliancn/mdlive/pull/102
 
-## [v0.17.0](https://github.com/k1LoW/mo/compare/v0.16.3...v0.17.0) - 2026-03-10
+## [v0.17.0](https://github.com/Aliancn/mdlive/compare/v0.16.3...v0.17.0) - 2026-03-10
 ### New Features 🎉
-- Proposal: add --bind flag to specify listen address by @110y in https://github.com/k1LoW/mo/pull/96
-- feat: add security warning with confirmation prompt for non-localhost --bind by @k1LoW in https://github.com/k1LoW/mo/pull/98
+- Proposal: add --bind flag to specify listen address by @110y in https://github.com/Aliancn/mdlive/pull/96
+- feat: add security warning with confirmation prompt for non-localhost --bind by @k1LoW in https://github.com/Aliancn/mdlive/pull/98
 
-## [v0.16.3](https://github.com/k1LoW/mo/compare/v0.16.2...v0.16.3) - 2026-03-10
+## [v0.16.3](https://github.com/Aliancn/mdlive/compare/v0.16.2...v0.16.3) - 2026-03-10
 ### Fix bug 🐛
-- fix: render Mermaid charts using actual container width by @k1LoW in https://github.com/k1LoW/mo/pull/95
+- fix: render Mermaid charts using actual container width by @k1LoW in https://github.com/Aliancn/mdlive/pull/95
 ### Other Changes
-- refactor: replace eslint with oxlint/oxfmt by @k1LoW in https://github.com/k1LoW/mo/pull/93
+- refactor: replace eslint with oxlint/oxfmt by @k1LoW in https://github.com/Aliancn/mdlive/pull/93
 
-## [v0.16.2](https://github.com/k1LoW/mo/compare/v0.16.1...v0.16.2) - 2026-03-09
+## [v0.16.2](https://github.com/Aliancn/mdlive/compare/v0.16.1...v0.16.2) - 2026-03-09
 ### Fix bug 🐛
-- Remove stale files when a watched directory is moved by @110y in https://github.com/k1LoW/mo/pull/91
+- Remove stale files when a watched directory is moved by @110y in https://github.com/Aliancn/mdlive/pull/91
 
-## [v0.16.1](https://github.com/k1LoW/mo/compare/v0.16.0...v0.16.1) - 2026-03-09
+## [v0.16.1](https://github.com/Aliancn/mdlive/compare/v0.16.0...v0.16.1) - 2026-03-09
 ### New Features 🎉
-- feat: preserve scroll position across live-reload and server restart by @k1LoW in https://github.com/k1LoW/mo/pull/90
+- feat: preserve scroll position across live-reload and server restart by @k1LoW in https://github.com/Aliancn/mdlive/pull/90
 ### Other Changes
-- feat: add ESLint to frontend and fix all lint errors by @k1LoW in https://github.com/k1LoW/mo/pull/88
+- feat: add ESLint to frontend and fix all lint errors by @k1LoW in https://github.com/Aliancn/mdlive/pull/88
 
-## [v0.16.0](https://github.com/k1LoW/mo/compare/v0.15.2...v0.16.0) - 2026-03-08
+## [v0.16.0](https://github.com/Aliancn/mdlive/compare/v0.15.2...v0.16.0) - 2026-03-08
 ### Breaking Changes 🛠
-- feat: display deeplinks when adding files via CLI by @k1LoW in https://github.com/k1LoW/mo/pull/86
-- feat: route processable output to stdout and add --json flag by @k1LoW in https://github.com/k1LoW/mo/pull/87
+- feat: display deeplinks when adding files via CLI by @k1LoW in https://github.com/Aliancn/mdlive/pull/86
+- feat: route processable output to stdout and add --json flag by @k1LoW in https://github.com/Aliancn/mdlive/pull/87
 ### New Features 🎉
-- feat: add LaTeX/math rendering support with KaTeX by @ysaito8015 in https://github.com/k1LoW/mo/pull/84
-- feat: add drag-and-drop file addition from OS file manager by @k1LoW in https://github.com/k1LoW/mo/pull/85
+- feat: add LaTeX/math rendering support with KaTeX by @ysaito8015 in https://github.com/Aliancn/mdlive/pull/84
+- feat: add drag-and-drop file addition from OS file manager by @k1LoW in https://github.com/Aliancn/mdlive/pull/85
 ### Other Changes
-- feat: use deterministic hash-based file IDs for deep linking by @k1LoW in https://github.com/k1LoW/mo/pull/81
+- feat: use deterministic hash-based file IDs for deep linking by @k1LoW in https://github.com/Aliancn/mdlive/pull/81
 
-## [v0.15.2](https://github.com/k1LoW/mo/compare/v0.15.1...v0.15.2) - 2026-03-07
+## [v0.15.2](https://github.com/Aliancn/mdlive/compare/v0.15.1...v0.15.2) - 2026-03-07
 ### Other Changes
-- fix: always restore backup when starting a new server by @k1LoW in https://github.com/k1LoW/mo/pull/80
+- fix: always restore backup when starting a new server by @k1LoW in https://github.com/Aliancn/mdlive/pull/80
 
-## [v0.15.1](https://github.com/k1LoW/mo/compare/v0.15.0...v0.15.1) - 2026-03-06
+## [v0.15.1](https://github.com/Aliancn/mdlive/compare/v0.15.0...v0.15.1) - 2026-03-06
 
-## [v0.15.0](https://github.com/k1LoW/mo/compare/v0.14.1...v0.15.0) - 2026-03-06
+## [v0.15.0](https://github.com/Aliancn/mdlive/compare/v0.14.1...v0.15.0) - 2026-03-06
 ### New Features 🎉
-- feat: add auto-backup and restore for sessions by @k1LoW in https://github.com/k1LoW/mo/pull/76
+- feat: add auto-backup and restore for sessions by @k1LoW in https://github.com/Aliancn/mdlive/pull/76
 
-## [v0.14.1](https://github.com/k1LoW/mo/compare/v0.14.0...v0.14.1) - 2026-03-06
+## [v0.14.1](https://github.com/Aliancn/mdlive/compare/v0.14.0...v0.14.1) - 2026-03-06
 ### Fix bug 🐛
-- fix: fix group dropdown not showing when no default group exists by @k1LoW in https://github.com/k1LoW/mo/pull/75
+- fix: fix group dropdown not showing when no default group exists by @k1LoW in https://github.com/Aliancn/mdlive/pull/75
 
-## [v0.14.0](https://github.com/k1LoW/mo/compare/v0.13.1...v0.14.0) - 2026-03-06
+## [v0.14.0](https://github.com/Aliancn/mdlive/compare/v0.13.1...v0.14.0) - 2026-03-06
 ### New Features 🎉
-- feat: add --restart flag by @k1LoW in https://github.com/k1LoW/mo/pull/71
-- Add file search filtering to sidebar by @harakeishi in https://github.com/k1LoW/mo/pull/72
-- feat: reload all browser tabs on server restart by @k1LoW in https://github.com/k1LoW/mo/pull/70
+- feat: add --restart flag by @k1LoW in https://github.com/Aliancn/mdlive/pull/71
+- Add file search filtering to sidebar by @harakeishi in https://github.com/Aliancn/mdlive/pull/72
+- feat: reload all browser tabs on server restart by @k1LoW in https://github.com/Aliancn/mdlive/pull/70
 ### Fix bug 🐛
-- fix: render code blocks without language using Shiki and copy button by @babarot in https://github.com/k1LoW/mo/pull/73
+- fix: render code blocks without language using Shiki and copy button by @babarot in https://github.com/Aliancn/mdlive/pull/73
 
-## [v0.13.1](https://github.com/k1LoW/mo/compare/v0.13.0...v0.13.1) - 2026-03-06
+## [v0.13.1](https://github.com/Aliancn/mdlive/compare/v0.13.0...v0.13.1) - 2026-03-06
 ### New Features 🎉
-- feat: add `--unwatch` flag to remove watched glob patterns by @k1LoW in https://github.com/k1LoW/mo/pull/65
+- feat: add `--unwatch` flag to remove watched glob patterns by @k1LoW in https://github.com/Aliancn/mdlive/pull/65
 ### Dependency Updates ⬆️
-- chore(deps): bump aquasecurity/trivy-action from 0.34.1 to 0.34.2 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/66
-- chore(deps): bump the dependencies group in /internal/frontend with 4 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/67
+- chore(deps): bump aquasecurity/trivy-action from 0.34.1 to 0.34.2 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/66
+- chore(deps): bump the dependencies group in /internal/frontend with 4 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/67
 
-## [v0.13.0](https://github.com/k1LoW/mo/compare/v0.12.0...v0.13.0) - 2026-03-05
+## [v0.13.0](https://github.com/Aliancn/mdlive/compare/v0.12.0...v0.13.0) - 2026-03-05
 ### New Features 🎉
-- feat: add `--watch` (`-w`) flag for glob pattern directory watching by @k1LoW in https://github.com/k1LoW/mo/pull/64
+- feat: add `--watch` (`-w`) flag for glob pattern directory watching by @k1LoW in https://github.com/Aliancn/mdlive/pull/64
 
-## [v0.12.0](https://github.com/k1LoW/mo/compare/v0.11.4...v0.12.0) - 2026-03-04
+## [v0.12.0](https://github.com/Aliancn/mdlive/compare/v0.11.4...v0.12.0) - 2026-03-04
 ### New Features 🎉
-- feat: support YAML frontmatter in Markdown files by @k1LoW in https://github.com/k1LoW/mo/pull/60
-- feat: support MDX files by @k1LoW in https://github.com/k1LoW/mo/pull/62
+- feat: support YAML frontmatter in Markdown files by @k1LoW in https://github.com/Aliancn/mdlive/pull/60
+- feat: support MDX files by @k1LoW in https://github.com/Aliancn/mdlive/pull/62
 
-## [v0.11.4](https://github.com/k1LoW/mo/compare/v0.11.3...v0.11.4) - 2026-03-04
+## [v0.11.4](https://github.com/Aliancn/mdlive/compare/v0.11.3...v0.11.4) - 2026-03-04
 ### Other Changes
-- Include frontend dependency licenses in CREDITS by @k1LoW in https://github.com/k1LoW/mo/pull/59
+- Include frontend dependency licenses in CREDITS by @k1LoW in https://github.com/Aliancn/mdlive/pull/59
 
-## [v0.11.3](https://github.com/k1LoW/mo/compare/v0.11.2...v0.11.3) - 2026-03-03
+## [v0.11.3](https://github.com/Aliancn/mdlive/compare/v0.11.2...v0.11.3) - 2026-03-03
 ### Other Changes
-- fix: avoid appending /default to URL when adding files to existing server by @k1LoW in https://github.com/k1LoW/mo/pull/56
+- fix: avoid appending /default to URL when adding files to existing server by @k1LoW in https://github.com/Aliancn/mdlive/pull/56
 
-## [v0.11.2](https://github.com/k1LoW/mo/compare/v0.11.1...v0.11.2) - 2026-03-03
+## [v0.11.2](https://github.com/Aliancn/mdlive/compare/v0.11.1...v0.11.2) - 2026-03-03
 ### New Features 🎉
-- fix: handle atomic saves and improve live-reload reliability by @k1LoW in https://github.com/k1LoW/mo/pull/54
+- fix: handle atomic saves and improve live-reload reliability by @k1LoW in https://github.com/Aliancn/mdlive/pull/54
 
-## [v0.11.1](https://github.com/k1LoW/mo/compare/v0.11.0...v0.11.1) - 2026-03-03
+## [v0.11.1](https://github.com/Aliancn/mdlive/compare/v0.11.0...v0.11.1) - 2026-03-03
 ### New Features 🎉
-- Allow slashes in --target group names and validate invalid characters by @k1LoW in https://github.com/k1LoW/mo/pull/53
+- Allow slashes in --target group names and validate invalid characters by @k1LoW in https://github.com/Aliancn/mdlive/pull/53
 
-## [v0.11.0](https://github.com/k1LoW/mo/compare/v0.10.1...v0.11.0) - 2026-03-02
+## [v0.11.0](https://github.com/Aliancn/mdlive/compare/v0.10.1...v0.11.0) - 2026-03-02
 ### Breaking Changes 🛠
-- feat: write logs to rotating files under XDG_STATE_HOME by @k1LoW in https://github.com/k1LoW/mo/pull/46
-- feat: run mo in background by default by @k1LoW in https://github.com/k1LoW/mo/pull/50
+- feat: write logs to rotating files under XDG_STATE_HOME by @k1LoW in https://github.com/Aliancn/mdlive/pull/46
+- feat: run mo in background by default by @k1LoW in https://github.com/Aliancn/mdlive/pull/50
 ### New Features 🎉
-- feat: add --close flag to gracefully shut down a running mo server by @k1LoW in https://github.com/k1LoW/mo/pull/47
-- feat: add --status flag to show all running mo servers by @k1LoW in https://github.com/k1LoW/mo/pull/51
+- feat: add --close flag to gracefully shut down a running mo server by @k1LoW in https://github.com/Aliancn/mdlive/pull/47
+- feat: add --status flag to show all running mo servers by @k1LoW in https://github.com/Aliancn/mdlive/pull/51
 ### Other Changes
-- Rename --close flag to --shutdown by @k1LoW in https://github.com/k1LoW/mo/pull/49
+- Rename --close flag to --shutdown by @k1LoW in https://github.com/Aliancn/mdlive/pull/49
 
-## [v0.10.1](https://github.com/k1LoW/mo/compare/v0.10.0...v0.10.1) - 2026-03-02
+## [v0.10.1](https://github.com/Aliancn/mdlive/compare/v0.10.0...v0.10.1) - 2026-03-02
 ### Other Changes
-- feat: update tree view toggle icon to file-tree style by @k1LoW in https://github.com/k1LoW/mo/pull/45
+- feat: update tree view toggle icon to file-tree style by @k1LoW in https://github.com/Aliancn/mdlive/pull/45
 
-## [v0.10.0](https://github.com/k1LoW/mo/compare/v0.9.0...v0.10.0) - 2026-03-02
+## [v0.10.0](https://github.com/Aliancn/mdlive/compare/v0.9.0...v0.10.0) - 2026-03-02
 ### New Features 🎉
-- feat: add drag-and-drop file reordering in sidebar by @k1LoW in https://github.com/k1LoW/mo/pull/41
-- feat: add move file to another group via kebab menu by @k1LoW in https://github.com/k1LoW/mo/pull/42
-- feat: add flat/tree view toggle for sidebar by @k1LoW in https://github.com/k1LoW/mo/pull/43
+- feat: add drag-and-drop file reordering in sidebar by @k1LoW in https://github.com/Aliancn/mdlive/pull/41
+- feat: add move file to another group via kebab menu by @k1LoW in https://github.com/Aliancn/mdlive/pull/42
+- feat: add flat/tree view toggle for sidebar by @k1LoW in https://github.com/Aliancn/mdlive/pull/43
 
-## [v0.9.0](https://github.com/k1LoW/mo/compare/v0.8.0...v0.9.0) - 2026-03-02
+## [v0.9.0](https://github.com/Aliancn/mdlive/compare/v0.8.0...v0.9.0) - 2026-03-02
 ### New Features 🎉
-- feat: add file remove feature by @k1LoW in https://github.com/k1LoW/mo/pull/36
-- feat: add Open in new tab to sidebar kebab menu by @k1LoW in https://github.com/k1LoW/mo/pull/38
-- feat: add restart server from Web UI by @k1LoW in https://github.com/k1LoW/mo/pull/39
+- feat: add file remove feature by @k1LoW in https://github.com/Aliancn/mdlive/pull/36
+- feat: add Open in new tab to sidebar kebab menu by @k1LoW in https://github.com/Aliancn/mdlive/pull/38
+- feat: add restart server from Web UI by @k1LoW in https://github.com/Aliancn/mdlive/pull/39
 
-## [v0.8.0](https://github.com/k1LoW/mo/compare/v0.7.0...v0.8.0) - 2026-03-01
+## [v0.8.0](https://github.com/Aliancn/mdlive/compare/v0.7.0...v0.8.0) - 2026-03-01
 ### New Features 🎉
-- feat: add copy buttons to Mermaid blocks by @k1LoW in https://github.com/k1LoW/mo/pull/34
+- feat: add copy buttons to Mermaid blocks by @k1LoW in https://github.com/Aliancn/mdlive/pull/34
 
-## [v0.7.0](https://github.com/k1LoW/mo/compare/v0.6.0...v0.7.0) - 2026-03-01
+## [v0.7.0](https://github.com/Aliancn/mdlive/compare/v0.6.0...v0.7.0) - 2026-03-01
 ### New Features 🎉
-- feat: add copy button to code blocks by @k1LoW in https://github.com/k1LoW/mo/pull/32
+- feat: add copy button to code blocks by @k1LoW in https://github.com/Aliancn/mdlive/pull/32
 ### Other Changes
-- test: improve frontend testing with colocation and component tests by @k1LoW in https://github.com/k1LoW/mo/pull/33
+- test: improve frontend testing with colocation and component tests by @k1LoW in https://github.com/Aliancn/mdlive/pull/33
 
-## [v0.6.0](https://github.com/k1LoW/mo/compare/v0.5.2...v0.6.0) - 2026-03-01
+## [v0.6.0](https://github.com/Aliancn/mdlive/compare/v0.5.2...v0.6.0) - 2026-03-01
 ### New Features 🎉
-- feat: add copy-to-clipboard button with format selection by @k1LoW in https://github.com/k1LoW/mo/pull/29
+- feat: add copy-to-clipboard button with format selection by @k1LoW in https://github.com/Aliancn/mdlive/pull/29
 ### Other Changes
-- fix: differentiate ToC indentation for each heading level by @k1LoW in https://github.com/k1LoW/mo/pull/30
+- fix: differentiate ToC indentation for each heading level by @k1LoW in https://github.com/Aliancn/mdlive/pull/30
 
-## [v0.5.2](https://github.com/k1LoW/mo/compare/v0.5.1...v0.5.2) - 2026-03-01
+## [v0.5.2](https://github.com/Aliancn/mdlive/compare/v0.5.1...v0.5.2) - 2026-03-01
 
-## [v0.5.1](https://github.com/k1LoW/mo/compare/v0.5.0...v0.5.1) - 2026-03-01
+## [v0.5.1](https://github.com/Aliancn/mdlive/compare/v0.5.0...v0.5.1) - 2026-03-01
 ### Fix bug 🐛
-- fix: resolve render loop caused by unstable references in ToC integration by @k1LoW in https://github.com/k1LoW/mo/pull/26
+- fix: resolve render loop caused by unstable references in ToC integration by @k1LoW in https://github.com/Aliancn/mdlive/pull/26
 
-## [v0.5.0](https://github.com/k1LoW/mo/compare/v0.4.1...v0.5.0) - 2026-02-28
+## [v0.5.0](https://github.com/Aliancn/mdlive/compare/v0.4.1...v0.5.0) - 2026-02-28
 ### New Features 🎉
-- feat: add raw markdown view toggle by @k1LoW in https://github.com/k1LoW/mo/pull/22
-- feat: add table of contents right panel by @k1LoW in https://github.com/k1LoW/mo/pull/24
+- feat: add raw markdown view toggle by @k1LoW in https://github.com/Aliancn/mdlive/pull/22
+- feat: add table of contents right panel by @k1LoW in https://github.com/Aliancn/mdlive/pull/24
 
-## [v0.4.1](https://github.com/k1LoW/mo/compare/v0.4.0...v0.4.1) - 2026-02-28
+## [v0.4.1](https://github.com/Aliancn/mdlive/compare/v0.4.0...v0.4.1) - 2026-02-28
 ### Fix bug 🐛
-- fix: reject directory paths passed as file arguments by @matsuyoshi30 in https://github.com/k1LoW/mo/pull/20
+- fix: reject directory paths passed as file arguments by @matsuyoshi30 in https://github.com/Aliancn/mdlive/pull/20
 
-## [v0.4.0](https://github.com/k1LoW/mo/compare/v0.3.2...v0.4.0) - 2026-02-28
+## [v0.4.0](https://github.com/Aliancn/mdlive/compare/v0.3.2...v0.4.0) - 2026-02-28
 ### New Features 🎉
-- feat: add --open and --no-open flags to control browser opening by @k1LoW in https://github.com/k1LoW/mo/pull/19
+- feat: add --open and --no-open flags to control browser opening by @k1LoW in https://github.com/Aliancn/mdlive/pull/19
 
-## [v0.3.2](https://github.com/k1LoW/mo/compare/v0.3.1...v0.3.2) - 2026-02-28
+## [v0.3.2](https://github.com/Aliancn/mdlive/compare/v0.3.1...v0.3.2) - 2026-02-28
 ### Fix bug 🐛
-- fix: serialize mermaid rendering to fix multiple diagrams by @k1LoW in https://github.com/k1LoW/mo/pull/15
+- fix: serialize mermaid rendering to fix multiple diagrams by @k1LoW in https://github.com/Aliancn/mdlive/pull/15
 
-## [v0.3.1](https://github.com/k1LoW/mo/compare/v0.3.0...v0.3.1) - 2026-02-27
+## [v0.3.1](https://github.com/Aliancn/mdlive/compare/v0.3.0...v0.3.1) - 2026-02-27
 ### Other Changes
-- refactor: improve donegroup usage for graceful shutdown by @k1LoW in https://github.com/k1LoW/mo/pull/13
-- refactor: replace log and fmt.Fprintf(os.Stderr) with slog by @k1LoW in https://github.com/k1LoW/mo/pull/14
+- refactor: improve donegroup usage for graceful shutdown by @k1LoW in https://github.com/Aliancn/mdlive/pull/13
+- refactor: replace log and fmt.Fprintf(os.Stderr) with slog by @k1LoW in https://github.com/Aliancn/mdlive/pull/14
 
-## [v0.3.0](https://github.com/k1LoW/mo/compare/v0.2.0...v0.3.0) - 2026-02-27
+## [v0.3.0](https://github.com/Aliancn/mdlive/compare/v0.2.0...v0.3.0) - 2026-02-27
 ### New Features 🎉
-- feat: support GitHub Alerts (admonitions) by @k1LoW in https://github.com/k1LoW/mo/pull/11
+- feat: support GitHub Alerts (admonitions) by @k1LoW in https://github.com/Aliancn/mdlive/pull/11
 
-## [v0.2.0](https://github.com/k1LoW/mo/compare/v0.1.1...v0.2.0) - 2026-02-27
+## [v0.2.0](https://github.com/Aliancn/mdlive/compare/v0.1.1...v0.2.0) - 2026-02-27
 ### New Features 🎉
-- feat: show file path tooltip on sidebar hover by @k1LoW in https://github.com/k1LoW/mo/pull/8
+- feat: show file path tooltip on sidebar hover by @k1LoW in https://github.com/Aliancn/mdlive/pull/8
 
-## [v0.1.1](https://github.com/k1LoW/mo/compare/v0.1.0...v0.1.1) - 2026-02-27
+## [v0.1.1](https://github.com/Aliancn/mdlive/compare/v0.1.0...v0.1.1) - 2026-02-27
 
-## [v0.1.0](https://github.com/k1LoW/mo/commits/v0.1.0) - 2026-02-27
+## [v0.1.0](https://github.com/Aliancn/mdlive/commits/v0.1.0) - 2026-02-27
 ### Dependency Updates ⬆️
-- chore(deps): bump pnpm/action-setup from 4.1.0 to 4.2.0 in the dependencies group by @dependabot[bot] in https://github.com/k1LoW/mo/pull/4
-- chore(deps): bump the dependencies group in /internal/frontend with 3 updates by @dependabot[bot] in https://github.com/k1LoW/mo/pull/6
+- chore(deps): bump pnpm/action-setup from 4.1.0 to 4.2.0 in the dependencies group by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/4
+- chore(deps): bump the dependencies group in /internal/frontend with 3 updates by @dependabot[bot] in https://github.com/Aliancn/mdlive/pull/6

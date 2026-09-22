@@ -1,14 +1,16 @@
 <p align="center">
 <br><br><br>
-<img src="https://github.com/k1LoW/mo/raw/main/images/logo.svg" width="120" alt="mo">
+<img src="https://github.com/Aliancn/mdlive/raw/main/images/logo.svg" width="120" alt="mo">
 <br><br><br>
 </p>
 
 # mo
 
-[![build](https://github.com/k1LoW/mo/actions/workflows/ci.yml/badge.svg)](https://github.com/k1LoW/mo/actions/workflows/ci.yml) ![Coverage](https://raw.githubusercontent.com/k1LoW/octocovs/main/badges/k1LoW/mo/coverage.svg) ![Code to Test Ratio](https://raw.githubusercontent.com/k1LoW/octocovs/main/badges/k1LoW/mo/ratio.svg) ![Test Execution Time](https://raw.githubusercontent.com/k1LoW/octocovs/main/badges/k1LoW/mo/time.svg)
+[![build](https://github.com/Aliancn/mdlive/actions/workflows/ci.yml/badge.svg)](https://github.com/Aliancn/mdlive/actions/workflows/ci.yml)
 
 `mo` is a **M**arkdown viewer that **o**pens `.md` files in a browser.
+
+> Forked from [k1LoW/mo](https://github.com/k1LoW/mo) (MIT License).
 
 ## Features
 
@@ -46,7 +48,7 @@ $ brew install k1LoW/tap/mo
 
 **manually:**
 
-Download binary from [releases page](https://github.com/k1LoW/mo/releases)
+Download binary from [releases page](https://github.com/Aliancn/mdlive/releases)
 
 ## Usage
 

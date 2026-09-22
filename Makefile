@@ -1,4 +1,4 @@
-PKG = github.com/k1LoW/mo
+PKG = github.com/Aliancn/mdlive
 COMMIT = $(shell git rev-parse --short HEAD)
 
 BUILD_LDFLAGS = "-s -w -X $(PKG)/version.Revision=$(COMMIT)"

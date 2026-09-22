@@ -1,4 +1,4 @@
-module github.com/k1LoW/mo
+module github.com/Aliancn/mdlive
 
 go 1.26.0
 
