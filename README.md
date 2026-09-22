@@ -1,16 +1,8 @@
-<p align="center">
-<br><br><br>
-<img src="https://github.com/Aliancn/mdlive/raw/main/images/logo.svg" width="120" alt="ml">
-<br><br><br>
-</p>
-
 # mdlive
 
 [![build](https://github.com/Aliancn/mdlive/actions/workflows/ci.yml/badge.svg)](https://github.com/Aliancn/mdlive/actions/workflows/ci.yml)
 
 `ml` is a **M**arkdown **L**ive viewer that opens `.md` files in a browser.
-
-> Forked from [k1LoW/mo](https://github.com/k1LoW/mo) (MIT License).
 
 ## Features
 
@@ -20,19 +12,19 @@
 - LaTeX math rendering ([KaTeX](https://katex.org/))
 - [GitHub Alerts](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax#alerts) (admonitions)
 - Fullscreen zoom modal for images and Mermaid diagrams
-- <img src="images/icons/theme-light.svg" width="16" height="16" alt="dark theme"> Dark / <img src="images/icons/theme-dark.svg" width="16" height="16" alt="light theme"> light theme
-- <img src="images/icons/group.svg" width="16" height="16" alt="group"> File grouping
-- <img src="images/icons/toc.svg" width="16" height="16" alt="toc"> Table of contents panel
-- <img src="images/icons/view-flat.svg" width="16" height="16" alt="flat view"> Flat / <img src="images/icons/view-tree.svg" width="16" height="16" alt="tree view"> tree sidebar view with drag-and-drop reorder
-- <img src="images/icons/title-filename.svg" width="16" height="16" alt="file name"> File name / <img src="images/icons/title-heading.svg" width="16" height="16" alt="heading title"> heading title sidebar display toggle (per-group)
-- <img src="images/icons/search.svg" width="16" height="16" alt="search"> Full-text search across file names and content
+- Dark / light theme
+- File grouping
+- Table of contents panel
+- Flat / tree sidebar view with drag-and-drop reorder
+- File name / heading title sidebar display toggle (per-group)
+- Full-text search across file names and content
 - YAML frontmatter display (collapsible metadata block)
 - MDX file support (renders as Markdown, strips `import`/`export`, escapes JSX tags)
-- <img src="images/icons/font-size.svg" width="16" height="16" alt="font size"> Content font size toggle (small / medium / large / extra large)
-- <img src="images/icons/width-expand.svg" width="16" height="16" alt="wide view"> Wide / <img src="images/icons/width-compress.svg" width="16" height="16" alt="narrow view"> narrow content width toggle
-- <img src="images/icons/raw.svg" width="16" height="16" alt="raw"> Raw markdown view
-- <img src="images/icons/copy.svg" width="16" height="16" alt="copy"> Copy content (Markdown / Text / HTML)
-- <img src="images/icons/restart.svg" width="16" height="16" alt="restart"> Server restart with session preservation
+- Content font size toggle (small / medium / large / extra large)
+- Wide / narrow content width toggle
+- Raw markdown view
+- Copy content (Markdown / Text / HTML)
+- Server restart with session preservation
 - Auto session backup and restore
 - Drag-and-drop file addition from the OS file manager (content is loaded in-memory; live-reload is not supported for dropped files)
 - Stdin pipe support (`cat file.md | ml`)
@@ -81,8 +73,6 @@ To run a completely separate session, use a different port:
 $ ml draft.md -p 6276
 ```
 
-![Multiple files with sidebar](images/multiple-files.png)
-
 ### Groups
 
 Files can be organized into named groups using the `--target` (`-t`) flag. Each group gets its own URL path and sidebar.
@@ -92,8 +82,6 @@ $ ml spec.md --target design      # Opens at http://localhost:6275/design
 $ ml api.md --target design       # Adds to the "design" group
 $ ml notes.md --target notes      # Opens at http://localhost:6275/notes
 ```
-
-![Group view](images/groups.png)
 
 ### Watch mode and glob patterns
 
@@ -173,10 +161,6 @@ Notes:
 
 The sidebar supports flat and tree view modes. Flat view shows file names only, while tree view displays the directory hierarchy.
 
-| <img src="images/icons/view-flat.svg" height="16"> Flat | <img src="images/icons/view-tree.svg" height="16"> Tree |
-|------|------|
-| ![Flat view](images/sidebar-flat.png) | ![Tree view](images/sidebar-tree.png) |
-
 ### Starting and stopping
 
 `ml` runs in the background by default — the command returns immediately, leaving the shell free for other work. This makes it easy to incorporate into scripts, tool chains, or LLM-driven workflows.
@@ -210,7 +194,7 @@ $ ml --foreground README.md
 
 ### Server restart
 
-Click the <img src="images/icons/restart.svg" width="16" height="16" alt="restart"> restart button (bottom-right corner) or run `ml --restart` to restart the `ml` server process. The current session — all open files and groups — is preserved across the restart. This is useful when you have updated the `ml` binary and want to pick up the new version without re-opening your files.
+Click the restart button (bottom-right corner) or run `ml --restart` to restart the `ml` server process. The current session — all open files and groups — is preserved across the restart. This is useful when you have updated the `ml` binary and want to pick up the new version without re-opening your files.
 
 ### Session backup and restore
 
@@ -318,13 +302,6 @@ Requires Go and [pnpm](https://pnpm.io/).
 $ make build
 ```
 
-## References
-
-- [yusukebe/gh-markdown-preview](https://github.com/yusukebe/gh-markdown-preview): GitHub CLI extension to preview Markdown looks like GitHub.
-
 ## License
 
 - [MIT License](LICENSE)
-    - Include logo as well as source code.
-    - Only logo license can be selected [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
-    - Also, if there is no alteration to the logo and it is used for technical information about ml, I would not say anything if the copyright notice is omitted.
