@@ -32,6 +32,20 @@
 
 ## Install
 
+**Homebrew:**
+
+``` console
+$ brew install Aliancn/tap/ml
+```
+
+**Install script** (macOS and Linux; picks the right binary, verifies the checksum, installs to `/usr/local/bin` or `~/.local/bin`):
+
+``` console
+$ curl -sfL https://raw.githubusercontent.com/Aliancn/mdlive/main/install.sh | sh
+```
+
+**Manually:**
+
 Download binary from [releases page](https://github.com/Aliancn/mdlive/releases)
 
 ## Usage
