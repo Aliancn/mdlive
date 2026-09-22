@@ -888,7 +888,7 @@ func TestWaitForReady_NonMoServer(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /_/api/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, "<html>not mo</html>")
+		fmt.Fprint(w, "<html>not ml</html>")
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -919,7 +919,7 @@ func TestWaitForReady_ChildExited(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /_/api/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, "<html>not mo</html>")
+		fmt.Fprint(w, "<html>not ml</html>")
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

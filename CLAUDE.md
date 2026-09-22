@@ -2,9 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## What is mo
+## What is ml
 
-`mo` is a CLI tool that opens Markdown files in a browser with live-reload. It runs a Go HTTP server that embeds a React SPA as a single binary. The Go module is `github.com/Aliancn/mdlive`.
+`ml` is a CLI tool that opens Markdown files in a browser with live-reload. It runs a Go HTTP server that embeds a React SPA as a single binary. The Go module is `github.com/Aliancn/mdlive`.
 
 ## Build & Run
 
@@ -65,10 +65,10 @@ cd internal/frontend && pnpm run dev
 - `--recursive` / `-R` — Recurse into subdirectories when a directory is given as an argument (expands `*.md` → `**/*.md`)
 - `--close` — Close files instead of opening them
 - `--clear` — Clear saved session for the specified port
-- `--status` — Show status of all running mo servers
-- `--shutdown` — Shut down the running mo server
-- `--restart` — Restart the running mo server
-- `--foreground` — Run mo server in foreground (do not background)
+- `--status` — Show status of all running ml servers
+- `--shutdown` — Shut down the running ml server
+- `--restart` — Restart the running ml server
+- `--foreground` — Run ml server in foreground (do not background)
 - `--json` — Output structured data as JSON to stdout
 - `--dangerously-allow-remote-access` — Allow remote access without authentication (trusted networks only)
 
@@ -81,8 +81,8 @@ cd internal/frontend && pnpm run dev
 - `internal/server/server.go` — HTTP server, state management (mutex-guarded), SSE for live-reload, file watcher (fsnotify). All API routes use `/_/` prefix to avoid collision with SPA route paths (group names).
 - `internal/static/static.go` — `go:generate` runs the frontend build, then `go:embed` embeds the output from `internal/static/dist/`.
 - `internal/frontend/` — Vite + React 19 + TypeScript + Tailwind CSS v4 SPA. Build output goes to `internal/static/dist/` (configured in `vite.config.ts`).
-- `internal/backup/` — State persistence for open files/groups using atomic JSON writes to `$XDG_STATE_HOME/mo/backup/`. Enables session restoration across server restarts.
-- `internal/logfile/` — Rotating JSON logging to `$XDG_STATE_HOME/mo/log/` (max 10MB, 3 backups, 7-day retention).
+- `internal/backup/` — State persistence for open files/groups using atomic JSON writes to `$XDG_STATE_HOME/ml/backup/`. Enables session restoration across server restarts.
+- `internal/logfile/` — Rotating JSON logging to `$XDG_STATE_HOME/ml/log/` (max 10MB, 3 backups, 7-day retention).
 - `internal/xdg/` — XDG Base Directory helper. `StateHome()` returns `$XDG_STATE_HOME` or default `~/.local/state`.
 - `version/version.go` — Version info, updated by tagpr on release. Build embeds revision via ldflags.
 - `testdata/` — Sample Markdown files (GFM, mermaid, math, alerts, etc.) and fixture projects for tests and dev. Reuse these for new test cases.
@@ -107,11 +107,11 @@ cd internal/frontend && pnpm run dev
 - **Sidebar view modes**: Flat (default, with drag-and-drop reorder via dnd-kit) and tree (hierarchical directory view). View mode is persisted per-group in localStorage. Collapsed directory state is managed inside `TreeView` and also persisted per-group.
 - **Resizable panels**: Both `Sidebar.tsx` (left) and `TocPanel.tsx` (right) use the same drag-to-resize pattern with localStorage persistence. Left sidebar uses `e.clientX`, right panel uses `window.innerWidth - e.clientX`.
 - **Toolbar buttons in content area**: The toolbar column (ToC + Raw toggles) lives inside `MarkdownViewer.tsx`, positioned with `shrink-0 flex flex-col gap-2 -mr-4 -mt-4` to align with the header.
-- **State persistence**: Server state (files, groups, patterns) is backed up to `$XDG_STATE_HOME/mo/backup/mo-<port>.json` via `internal/backup`. On `--restart`, the server reloads this state to preserve the session. When starting a new server, backup is always restored and merged with CLI-specified files/patterns (restored entries first, CLI entries appended, duplicates skipped). The backup file is preserved across clean `--shutdown` and is only removed via the `--clear` path in the CLI.
+- **State persistence**: Server state (files, groups, patterns) is backed up to `$XDG_STATE_HOME/ml/backup/ml-<port>.json` via `internal/backup`. On `--restart`, the server reloads this state to preserve the session. When starting a new server, backup is always restored and merged with CLI-specified files/patterns (restored entries first, CLI entries appended, duplicates skipped). The backup file is preserved across clean `--shutdown` and is only removed via the `--clear` path in the CLI.
 - **Positional arguments**: `resolveArgs(args, watchMode, recursive)` classifies each positional arg as a glob (via `hasGlobChars`), directory, or file. With `--watch`, globs and directories become watch patterns (`dir/*.md` or `dir/**/*.md` when `-R`). Without `--watch`, they are expanded once via `doublestar.Glob` / `filepath.Glob` and treated as files. Plain files are added directly. `--watch` alone without a glob/dir positional errors out (with a shell-expansion hint if only files were given).
 - **Stdin pipe**: When no file arguments are given and stdin is a pipe (not a terminal), content is read from stdin and treated as an uploaded file. Name is `stdin-<first 7 hex of SHA-256>.md` (deterministic, consistent with upload dedup). If a server is already running, content is POSTed to the upload API; otherwise it is passed as `UploadedFileData` to the new server. Combining stdin with file arguments or `--watch` returns an error. Max stdin size is 10MB (same as server upload limit).
 - **Glob pattern watching**: `--watch` turns on watch mode; directory and glob positional arguments are registered as patterns, then expanded to matching files and monitored for new files via fsnotify directory watches. Patterns are stored with reference-counted directory watches (`watchedDirs map[string]int`). `--unwatch` is a boolean flag that uses positional arguments (globs or directories) to determine which patterns to remove; with `-R`, a directory argument removes all registered patterns under that directory prefix. Ref counts are decremented accordingly. Groups persist as long as they have files or patterns.
-- **localStorage conventions**: All keys use `mo-` prefix (e.g., `mo-sidebar-width`, `mo-sidebar-viewmode`, `mo-sidebar-tree-collapsed`, `mo-theme`). Read patterns use `try/catch` around `JSON.parse` with fallback defaults.
+- **localStorage conventions**: All keys use `ml-` prefix (e.g., `ml-sidebar-width`, `ml-sidebar-viewmode`, `ml-sidebar-tree-collapsed`, `ml-theme`). Read patterns use `try/catch` around `JSON.parse` with fallback defaults.
 
 ## API Conventions
 

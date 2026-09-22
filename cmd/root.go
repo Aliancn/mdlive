@@ -51,9 +51,9 @@ const (
 	markdownGlobRecursive = "**/*.md"
 )
 
-// errServerConflict is returned by waitForReady when a mo server other than
+// errServerConflict is returned by waitForReady when a ml server other than
 // the spawned child owns the port (e.g. lost a concurrent startup race).
-var errServerConflict = errors.New("another mo server is already running")
+var errServerConflict = errors.New("another ml server is already running")
 
 var (
 	target                       string
@@ -76,68 +76,68 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "mo [flags] [FILE|DIR ...]",
-	Short: "mo is a Markdown viewer that opens .md files in a browser.",
-	Long: `mo is a Markdown viewer that opens .md files in a browser with live-reload.
+	Use:   "ml [flags] [FILE|DIR ...]",
+	Short: "ml is a Markdown viewer that opens .md files in a browser.",
+	Long: `ml is a Markdown viewer that opens .md files in a browser with live-reload.
 
 It runs in the background, serving Markdown files using a built-in React SPA,
 and automatically refreshes the browser when files are saved.
 
 Examples:
-  mo README.md                          Open a single file
-  mo README.md CHANGELOG.md docs/*.md   Open multiple files
-  mo spec.md --target design            Open in a named group
-  mo draft.md --port 6276               Use a different port
-  cat notes.md | mo                     Read Markdown from stdin
-  cmd | mo --target output              Pipe command output into a group
+  ml README.md                          Open a single file
+  ml README.md CHANGELOG.md docs/*.md   Open multiple files
+  ml spec.md --target design            Open in a named group
+  ml draft.md --port 6276               Use a different port
+  cat notes.md | ml                     Read Markdown from stdin
+  cmd | ml --target output              Pipe command output into a group
 
 Single Server, Multiple Files:
-  By default, mo runs a single server on port 6275.
-  If a mo server is already running on the same port, subsequent mo
+  By default, ml runs a single server on port 6275.
+  If a ml server is already running on the same port, subsequent ml
   invocations add files to the existing session instead of starting a new one.
 
-  $ mo README.md          # Starts a mo server in the background
-  $ mo CHANGELOG.md       # Adds the file to the running mo server
+  $ ml README.md          # Starts a ml server in the background
+  $ ml CHANGELOG.md       # Adds the file to the running ml server
 
   To run a completely separate session, use a different port:
 
-  $ mo draft.md -p 6276
+  $ ml draft.md -p 6276
 
 Groups:
   Files can be organized into named groups using the --target (-t) flag.
   Each group gets its own URL path (e.g., http://localhost:6275/design)
   and its own sidebar in the browser.
 
-  $ mo spec.md --target design      # Opens at /design
-  $ mo api.md --target design       # Adds to the "design" group
-  $ mo notes.md --target notes      # Opens at /notes
+  $ ml spec.md --target design      # Opens at /design
+  $ ml api.md --target design       # Adds to the "design" group
+  $ ml notes.md --target notes      # Opens at /notes
 
   If no --target is specified, files are added to the "default" group.
 
 Starting and Stopping:
-  mo runs in the background by default. The command returns
+  ml runs in the background by default. The command returns
   immediately, leaving the shell free for other work.
 
-  $ mo README.md            # Starts mo in the background
-  $ mo --status             # Shows all running mo servers
-  $ mo --shutdown           # Shuts it down
-  $ mo --restart            # Restarts it (preserving session)
+  $ ml README.md            # Starts ml in the background
+  $ ml --status             # Shows all running ml servers
+  $ ml --shutdown           # Shuts it down
+  $ ml --restart            # Restarts it (preserving session)
 
-  Use --foreground to keep the mo server in the foreground.
+  Use --foreground to keep the ml server in the foreground.
 
 Session Restore:
-  mo automatically saves session state. When starting a new server,
+  ml automatically saves session state. When starting a new server,
   the previous session is restored and merged with any specified files.
 
-  $ mo README.md CHANGELOG.md    # Start with two files
-  $ mo --shutdown                # Shut down the server
-  $ mo                           # Restores README.md and CHANGELOG.md
-  $ mo TODO.md                   # Restores previous session + adds TODO.md
+  $ ml README.md CHANGELOG.md    # Start with two files
+  $ ml --shutdown                # Shut down the server
+  $ ml                           # Restores README.md and CHANGELOG.md
+  $ ml TODO.md                   # Restores previous session + adds TODO.md
 
   Use --clear to remove a saved session.
 
 Live-Reload:
-  mo watches all opened files for changes using filesystem notifications.
+  ml watches all opened files for changes using filesystem notifications.
   When a file is saved, the browser automatically re-renders the content.
 
 Supported Markdown Features:
@@ -157,23 +157,23 @@ Watch mode and glob patterns:
   opened and new files are picked up automatically. Combine with
   --recursive (-R) to descend into subdirectories.
 
-  $ mo -w '**/*.md'                   Watch all .md files recursively
-  $ mo -w 'docs/**/*.md' -t docs      Watch docs/ tree in "docs" group
-  $ mo -w '*.md' 'docs/**/*.md'       Multiple patterns (positional)
-  $ mo -w docs/                       Watch docs/*.md
-  $ mo -w -R docs/                    Watch docs/**/*.md
-  $ mo -wR docs/                      Same (short-combined form)
-  $ mo --unwatch '**/*.md'            Stop watching a pattern
-  $ mo --unwatch docs/                Stop watching docs/*.md
-  $ mo --unwatch -R docs/             Stop watching all patterns under docs/
+  $ ml -w '**/*.md'                   Watch all .md files recursively
+  $ ml -w 'docs/**/*.md' -t docs      Watch docs/ tree in "docs" group
+  $ ml -w '*.md' 'docs/**/*.md'       Multiple patterns (positional)
+  $ ml -w docs/                       Watch docs/*.md
+  $ ml -w -R docs/                    Watch docs/**/*.md
+  $ ml -wR docs/                      Same (short-combined form)
+  $ ml --unwatch '**/*.md'            Stop watching a pattern
+  $ ml --unwatch docs/                Stop watching docs/*.md
+  $ ml --unwatch -R docs/             Stop watching all patterns under docs/
 
   Without --watch, globs are expanded once and a directory argument
   opens the matching files without live-watching new additions.
 
-  $ mo -R docs/                       Open every .md under docs/ once
+  $ ml -R docs/                       Open every .md under docs/ once
 
 WARNING: --bind with a non-loopback address:
-  Binding to a non-localhost address (e.g. 0.0.0.0) exposes mo to the
+  Binding to a non-localhost address (e.g. 0.0.0.0) exposes ml to the
   network without any authentication. Remote clients can read any file
   accessible by this user, browse the filesystem via glob patterns, and
   shut down the server. A confirmation prompt is shown before starting.`,
@@ -195,13 +195,13 @@ func init() {
 	rootCmd.Flags().BoolVar(&open, "open", false, "Always open browser (even when adding to existing group)")
 	rootCmd.Flags().BoolVar(&noOpen, "no-open", false, "Do not open browser automatically")
 	rootCmd.MarkFlagsMutuallyExclusive("open", "no-open")
-	rootCmd.Flags().BoolVar(&shutdownServer, "shutdown", false, "Shut down the running mo server on the specified port")
-	rootCmd.Flags().BoolVar(&restartServer, "restart", false, "Restart the running mo server on the specified port")
+	rootCmd.Flags().BoolVar(&shutdownServer, "shutdown", false, "Shut down the running ml server on the specified port")
+	rootCmd.Flags().BoolVar(&restartServer, "restart", false, "Restart the running ml server on the specified port")
 	rootCmd.MarkFlagsMutuallyExclusive("shutdown", "restart")
 	rootCmd.Flags().StringVar(&restore, "restore", "", "Restore state from file (internal use)")
 	rootCmd.Flags().MarkHidden("restore") //nolint:errcheck
-	rootCmd.Flags().BoolVar(&foreground, "foreground", false, "Run mo server in foreground (do not background)")
-	rootCmd.Flags().BoolVar(&statusServer, "status", false, "Show status of all running mo servers")
+	rootCmd.Flags().BoolVar(&foreground, "foreground", false, "Run ml server in foreground (do not background)")
+	rootCmd.Flags().BoolVar(&statusServer, "status", false, "Show status of all running ml servers")
 	rootCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Treat directory and glob arguments as watch patterns")
 	rootCmd.Flags().BoolVar(&unwatchMode, "unwatch", false, "Remove watched patterns for the given directory or glob arguments")
 	rootCmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "Recurse into subdirectories when a directory is given")
@@ -225,7 +225,7 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 			// prints the error anyway.
 			defer func() {
 				if retErr != nil {
-					slog.Error("mo exited with error", "error", retErr)
+					slog.Error("ml exited with error", "error", retErr)
 				}
 			}()
 		}
@@ -242,18 +242,18 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 		hasBackup := backup.Exists(port)
 
 		if !wasServerRunning && !hasBackup {
-			fmt.Fprintf(os.Stderr, "mo: no saved session for port %d\n", port)
+			fmt.Fprintf(os.Stderr, "ml: no saved session for port %d\n", port)
 			return nil
 		}
-		fmt.Fprintf(os.Stderr, "mo: clear saved session for port %d? [Y/n] ", port)
+		fmt.Fprintf(os.Stderr, "ml: clear saved session for port %d? [Y/n] ", port)
 		scanner := bufio.NewScanner(os.Stdin)
 		if !scanner.Scan() {
-			fmt.Fprintln(os.Stderr, "mo: canceled")
+			fmt.Fprintln(os.Stderr, "ml: canceled")
 			return nil
 		}
 		ans := strings.TrimSpace(scanner.Text())
 		if ans != "" && strings.ToLower(ans) != "y" && strings.ToLower(ans) != "yes" {
-			fmt.Fprintln(os.Stderr, "mo: canceled")
+			fmt.Fprintln(os.Stderr, "ml: canceled")
 			return nil
 		}
 
@@ -279,9 +279,9 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 			if _, err := spawnNewProcess(addr, ""); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "mo: cleared session and restarted server on port %d\n", port)
+			fmt.Fprintf(os.Stderr, "ml: cleared session and restarted server on port %d\n", port)
 		} else {
-			fmt.Fprintf(os.Stderr, "mo: cleared saved session for port %d\n", port)
+			fmt.Fprintf(os.Stderr, "ml: cleared saved session for port %d\n", port)
 		}
 		return nil
 	}
@@ -338,7 +338,7 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 			for _, name := range names {
 				fmt.Printf("  %s\n", name)
 			}
-			fmt.Fprintf(os.Stderr, "mo: closed %d file(s) from http://%s\n", len(closedPaths), addr)
+			fmt.Fprintf(os.Stderr, "ml: closed %d file(s) from http://%s\n", len(closedPaths), addr)
 		}
 		return err
 	}
@@ -438,7 +438,7 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 			}
 			slog.Info("added to existing server", "files", len(files), "patterns", len(patterns), "stdin", stdinData != nil, "addr", addr)
 			emitServeOutput(addr, deeplinks, false)
-			fmt.Fprintf(os.Stderr, "mo: added %d item(s) to http://%s\n", added, addr)
+			fmt.Fprintf(os.Stderr, "ml: added %d item(s) to http://%s\n", added, addr)
 
 			if isNewGroup || open {
 				openBrowser(addr)
@@ -462,7 +462,7 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 	var uploadedFiles []server.UploadedFileData
 	if len(restoredFiles) > 0 || len(restoredPatterns) > 0 || len(restoredUploads) > 0 {
 		slog.Info("restoring session from backup", "port", port)
-		fmt.Fprintf(os.Stderr, "mo: restoring previous session for port %d\n", port)
+		fmt.Fprintf(os.Stderr, "ml: restoring previous session for port %d\n", port)
 		filesByGroup = mergeGroups(restoredFiles, filesByGroup)
 		patternsByGroup = mergeGroups(restoredPatterns, patternsByGroup)
 		uploadedFiles = restoredUploads
@@ -484,7 +484,7 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 		o := termenv.NewOutput(os.Stderr)
 		c := func(s string) termenv.Style { return o.String(s).Foreground(o.Color("208")) }
 		fmt.Fprintln(os.Stderr, c("SECURITY WARNING:").Bold(),
-			c(fmt.Sprintf("Binding to %s instead of localhost. mo has no authentication -- remote clients can:", bind)))
+			c(fmt.Sprintf("Binding to %s instead of localhost. ml has no authentication -- remote clients can:", bind)))
 		fmt.Fprintln(os.Stderr, c("  - Read any file accessible by this user"))
 		fmt.Fprintln(os.Stderr, c("  - Browse the filesystem via glob patterns"))
 		fmt.Fprintln(os.Stderr, c("  - Shut down or restart the server"))
@@ -494,12 +494,12 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 			if err := scanner.Err(); err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stderr, "mo: canceled")
+			fmt.Fprintln(os.Stderr, "ml: canceled")
 			return nil
 		}
 		ans := strings.ToLower(strings.TrimSpace(scanner.Text()))
 		if ans != "y" && ans != "yes" {
-			fmt.Fprintln(os.Stderr, "mo: canceled")
+			fmt.Fprintln(os.Stderr, "ml: canceled")
 			return nil
 		}
 	}
@@ -976,7 +976,7 @@ type probeResult struct {
 	groups []string
 }
 
-// probeServer checks that a mo server is running on addr by calling
+// probeServer checks that a ml server is running on addr by calling
 // GET /_/api/status and validating the response contains a version field.
 func probeServer(addr string, timeout ...time.Duration) (*probeResult, error) {
 	t := probeTimeoutDefault
@@ -986,7 +986,7 @@ func probeServer(addr string, timeout ...time.Duration) (*probeResult, error) {
 	client := &http.Client{Timeout: t}
 	resp, err := client.Get(fmt.Sprintf("http://%s/_/api/status", addr))
 	if err != nil {
-		return nil, fmt.Errorf("no mo server found on %s", addr)
+		return nil, fmt.Errorf("no ml server found on %s", addr)
 	}
 	defer resp.Body.Close()
 
@@ -1002,7 +1002,7 @@ func probeServer(addr string, timeout ...time.Duration) (*probeResult, error) {
 		} `json:"groups"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil || status.Version == "" {
-		return nil, fmt.Errorf("server on %s is not a mo instance", addr)
+		return nil, fmt.Errorf("server on %s is not a ml instance", addr)
 	}
 
 	groups := make([]string, len(status.Groups))
@@ -1049,7 +1049,7 @@ func doShutdown(addr string) error {
 	}
 
 	slog.Info("shutdown request sent", "addr", addr)
-	fmt.Fprintf(os.Stderr, "mo: shutdown request sent to http://%s\n", addr)
+	fmt.Fprintf(os.Stderr, "ml: shutdown request sent to http://%s\n", addr)
 	return nil
 }
 
@@ -1070,7 +1070,7 @@ func doRestart(addr string) error {
 	}
 
 	slog.Info("restart request sent", "addr", addr)
-	fmt.Fprintf(os.Stderr, "mo: restart request sent to http://%s\n", addr)
+	fmt.Fprintf(os.Stderr, "ml: restart request sent to http://%s\n", addr)
 	return nil
 }
 
@@ -1109,7 +1109,7 @@ func doUnwatch(addr string, patterns []string, groupName string) error {
 		}
 
 		slog.Info("pattern removed", "pattern", pat, "group", groupName)
-		fmt.Fprintf(os.Stderr, "mo: unwatched %s\n", pat)
+		fmt.Fprintf(os.Stderr, "ml: unwatched %s\n", pat)
 	}
 
 	return nil
@@ -1208,7 +1208,7 @@ func doStatus() error {
 		if jsonOutput {
 			writeJSON([]jsonStatusEntry{})
 		} else {
-			fmt.Fprintln(os.Stderr, "mo: no mo server found")
+			fmt.Fprintln(os.Stderr, "ml: no ml server found")
 		}
 		return nil
 	}
@@ -1284,7 +1284,7 @@ func doStatus() error {
 		}
 		writeJSON(jsonEntries)
 	} else if !found {
-		fmt.Fprintln(os.Stderr, "mo: no mo server found")
+		fmt.Fprintln(os.Stderr, "ml: no ml server found")
 	}
 
 	return nil
@@ -1303,12 +1303,12 @@ func discoverPorts() []int {
 	var ports []int
 	for _, e := range entries {
 		name := e.Name()
-		// Match "mo-{port}.log"
-		if !strings.HasPrefix(name, "mo-") || !strings.HasSuffix(name, ".log") {
+		// Match "ml-{port}.log"
+		if !strings.HasPrefix(name, "ml-") || !strings.HasSuffix(name, ".log") {
 			continue
 		}
-		// Exclude rotated backups like "mo-6275.log.1"
-		raw := strings.TrimSuffix(strings.TrimPrefix(name, "mo-"), ".log")
+		// Exclude rotated backups like "ml-6275.log.1"
+		raw := strings.TrimSuffix(strings.TrimPrefix(name, "ml-"), ".log")
 		p, err := strconv.Atoi(raw)
 		if err != nil {
 			continue
@@ -1495,7 +1495,7 @@ func startBackground(addr string, filesByGroup map[string][]string, patternsByGr
 			os.Remove(restoreFile) //nolint:errcheck // best-effort; the child may have consumed it already
 		}
 		if errors.Is(err, errServerConflict) {
-			// Lost a concurrent startup race: another mo server owns the
+			// Lost a concurrent startup race: another ml server owns the
 			// port. Add our files to the winner instead of reporting a
 			// false success.
 			return addToRunningServer(addr, status, filesByGroup, patternsByGroup, uploadedFiles)
@@ -1516,18 +1516,18 @@ func startBackground(addr string, filesByGroup map[string][]string, patternsByGr
 		}
 	}
 	emitServeOutput(addr, deeplinks, true)
-	fmt.Fprintf(os.Stderr, "mo: serving at http://%s (pid %d)\n", addr, pid)
+	fmt.Fprintf(os.Stderr, "ml: serving at http://%s (pid %d)\n", addr, pid)
 
 	openBrowser(addr)
 
 	return nil
 }
 
-// addToRunningServer posts files, patterns, and uploaded files to a mo server
+// addToRunningServer posts files, patterns, and uploaded files to a ml server
 // that is already running on addr. Used when a background start loses the
-// port to another mo instance (concurrent startup race).
+// port to another ml instance (concurrent startup race).
 func addToRunningServer(addr string, status *statusResponse, filesByGroup map[string][]string, patternsByGroup map[string][]string, uploadedFiles []server.UploadedFileData) error {
-	slog.Info("port already served by another mo instance; adding to it", "addr", addr, "pid", status.PID)
+	slog.Info("port already served by another ml instance; adding to it", "addr", addr, "pid", status.PID)
 	client := &http.Client{Timeout: probeTimeoutDefault}
 	var deeplinks []deeplinkEntry
 	added := 0
@@ -1555,10 +1555,10 @@ func addToRunningServer(addr string, status *statusResponse, filesByGroup map[st
 		added++
 	}
 	if attempted > 0 && added == 0 {
-		return fmt.Errorf("failed to add any items to the mo server at http://%s (check log file for details)", addr)
+		return fmt.Errorf("failed to add any items to the ml server at http://%s (check log file for details)", addr)
 	}
 	emitServeOutput(addr, deeplinks, true)
-	fmt.Fprintf(os.Stderr, "mo: another mo server is already running at http://%s (pid %d); added %d item(s) to it\n", addr, status.PID, added)
+	fmt.Fprintf(os.Stderr, "ml: another ml server is already running at http://%s (pid %d); added %d item(s) to it\n", addr, status.PID, added)
 
 	isNewGroup := true
 	for _, g := range status.Groups {
@@ -1586,10 +1586,10 @@ func openBrowser(addr string) {
 	}
 }
 
-// waitForReady polls addr until a mo server responds as ready, the spawned
+// waitForReady polls addr until a ml server responds as ready, the spawned
 // child (childPID) dies, or timeout elapses.
 //
-// If a mo server responds but its PID does not match childPID, the spawned
+// If a ml server responds but its PID does not match childPID, the spawned
 // child lost a concurrent startup race for the port; errServerConflict is
 // returned along with the winning server's status.
 func waitForReady(addr string, childPID int, timeout time.Duration) (*statusResponse, error) {
@@ -1626,5 +1626,5 @@ func waitForReady(addr string, childPID int, timeout time.Duration) (*statusResp
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	return nil, fmt.Errorf("server did not become ready within %s; the port may be in use by another (non-mo) server (check log file for details)", timeout)
+	return nil, fmt.Errorf("server did not become ready within %s; the port may be in use by another (non-ml) server (check log file for details)", timeout)
 }

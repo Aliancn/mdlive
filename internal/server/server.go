@@ -849,7 +849,7 @@ type RestoreData struct {
 
 // WriteRestoreFile writes RestoreData to a temporary file and returns the path.
 func WriteRestoreFile(data RestoreData) (string, error) {
-	f, err := os.CreateTemp("", "mo-restore-*.json")
+	f, err := os.CreateTemp("", "ml-restore-*.json")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -2139,7 +2139,7 @@ func handleFileRaw(state *State) http.HandlerFunc {
 		absPath := filepath.Join(filepath.Dir(entry.Path), relPath)
 		absPath = filepath.Clean(absPath)
 
-		// No boundary check: mo serves local files to the user's own browser
+		// No boundary check: ml serves local files to the user's own browser
 		// (like handleOpenFile); http.ServeFile already rejects "..".
 		http.ServeFile(w, r, absPath)
 	}

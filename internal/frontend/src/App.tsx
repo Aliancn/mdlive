@@ -38,11 +38,11 @@ import {
 import { isMarkdownFile } from "./utils/filetype";
 import { formatFileLabel } from "./utils/fileLabel";
 
-const VIEWMODE_STORAGE_KEY = "mo-sidebar-viewmode";
-const WIDTH_STORAGE_KEY = "mo-layout-width";
-const SHOW_TITLE_STORAGE_KEY = "mo-sidebar-show-title";
-export const FONT_SIZE_STORAGE_KEY = "mo-font-size";
-export const TOC_OPEN_STORAGE_KEY = "mo-toc-open";
+const VIEWMODE_STORAGE_KEY = "ml-sidebar-viewmode";
+const WIDTH_STORAGE_KEY = "ml-layout-width";
+const SHOW_TITLE_STORAGE_KEY = "ml-sidebar-show-title";
+export const FONT_SIZE_STORAGE_KEY = "ml-font-size";
+export const TOC_OPEN_STORAGE_KEY = "ml-toc-open";
 
 export function getInitialFontSize(): FontSize {
   try {

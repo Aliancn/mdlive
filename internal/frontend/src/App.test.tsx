@@ -21,7 +21,7 @@ vi.mock("./hooks/useSSE", () => ({ useSSE: () => {} }));
 vi.mock("./hooks/useFileDrop", () => ({ useFileDrop: () => ({ isDragging: false }) }));
 
 vi.mock("./hooks/useScrollRestoration", () => ({
-  SCROLL_SESSION_KEY: "mo-scroll-context",
+  SCROLL_SESSION_KEY: "ml-scroll-context",
   useScrollRestoration: () => ({ captureScrollPosition: () => {}, onContentRendered: () => {} }),
 }));
 

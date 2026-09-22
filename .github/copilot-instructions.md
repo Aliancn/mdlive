@@ -1,8 +1,8 @@
-# Copilot Instructions for mo (Markdown Opener)
+# Copilot Instructions for ml (Markdown Opener)
 
-## What is mo
+## What is ml
 
-`mo` is a CLI tool that opens Markdown files in a browser with live-reload. It runs a Go HTTP server that embeds a React SPA as a single binary. The Go module is `github.com/Aliancn/mdlive`.
+`ml` is a CLI tool that opens Markdown files in a browser with live-reload. It runs a Go HTTP server that embeds a React SPA as a single binary. The Go module is `github.com/Aliancn/mdlive`.
 
 ## Build & Run
 
@@ -51,10 +51,10 @@ make ci
 - `--recursive` / `-R` — Recurse into subdirectories when a directory is given as an argument
 - `--close` — Close files instead of opening them
 - `--clear` — Clear saved session for the specified port
-- `--status` — Show status of all running mo servers
-- `--shutdown` — Shut down the running mo server
-- `--restart` — Restart the running mo server
-- `--foreground` — Run mo server in foreground (do not background)
+- `--status` — Show status of all running ml servers
+- `--shutdown` — Shut down the running ml server
+- `--restart` — Restart the running ml server
+- `--foreground` — Run ml server in foreground (do not background)
 - `--json` — Output structured data as JSON to stdout
 - `--dangerously-allow-remote-access` — Allow remote access without authentication (trusted networks only)
 
@@ -103,12 +103,12 @@ Key endpoints:
 - **File IDs**: Files get deterministic string IDs derived from the SHA-256 hash of the absolute path (first 8 hex characters). IDs are stable across server restarts, enabling deep linking. The frontend primarily references files by ID. Absolute paths are available via `FileEntry.path` for display.
 - **Tab groups**: Files are organized into named groups (default: "default"). Group name maps to the URL path.
 - **Live-reload via SSE**: fsnotify watches files; `file-changed` events trigger frontend to re-fetch content by file ID.
-- **State persistence**: Server state (files, groups, patterns) is backed up to `$XDG_STATE_HOME/mo/backup/mo-<port>.json` via `internal/backup`. When starting a new server, backup is always restored and merged with CLI-specified files/patterns (restored entries first, CLI entries appended, duplicates skipped). The backup file is only deleted when the CLI is invoked with `--clear`.
+- **State persistence**: Server state (files, groups, patterns) is backed up to `$XDG_STATE_HOME/ml/backup/ml-<port>.json` via `internal/backup`. When starting a new server, backup is always restored and merged with CLI-specified files/patterns (restored entries first, CLI entries appended, duplicates skipped). The backup file is only deleted when the CLI is invoked with `--clear`.
 - **Glob pattern watching**: `--watch` enables watch mode; positional arguments that are globs or directories are registered as patterns, expanded to matching files, and monitored for new files via fsnotify directory watches. Patterns are stored with reference-counted directory watches (`watchedDirs map[string]int`). `--unwatch` is a boolean flag; positional arguments (globs or directories) determine which patterns to remove. With `-R`, a directory argument removes all registered patterns under that directory prefix. Groups persist as long as they have files or patterns.
 - **Resizable panels**: Both `Sidebar.tsx` (left) and `TocPanel.tsx` (right) use the same drag-to-resize pattern with localStorage persistence. Left sidebar uses `e.clientX`, right panel uses `window.innerWidth - e.clientX`.
 - **Toolbar buttons in content area**: The toolbar column (ToC + Raw toggles) lives inside `MarkdownViewer.tsx`, positioned with `shrink-0 flex flex-col gap-2 -mr-4 -mt-4` to align with the header.
 - **Sidebar view modes**: Flat (default, with drag-and-drop reorder via dnd-kit) and tree (hierarchical directory view). View mode is persisted per-group in localStorage. Collapsed directory state is managed inside `TreeView` and also persisted per-group.
-- **localStorage conventions**: All keys use `mo-` prefix (e.g., `mo-sidebar-width`, `mo-sidebar-viewmode`, `mo-sidebar-tree-collapsed`, `mo-theme`). Read patterns use `try/catch` around `JSON.parse` with fallback defaults.
+- **localStorage conventions**: All keys use `ml-` prefix (e.g., `ml-sidebar-width`, `ml-sidebar-viewmode`, `ml-sidebar-tree-collapsed`, `ml-theme`). Read patterns use `try/catch` around `JSON.parse` with fallback defaults.
 
 ## CI/CD
 

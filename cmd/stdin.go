@@ -53,7 +53,7 @@ type uploadRequest struct {
 	Content string `json:"content"`
 }
 
-// postUploadedFile uploads in-memory content to a running mo server.
+// postUploadedFile uploads in-memory content to a running ml server.
 func postUploadedFile(client *http.Client, addr, group, name, content string) (deeplinkEntry, error) {
 	body, err := json.Marshal(uploadRequest{
 		Name:    name,

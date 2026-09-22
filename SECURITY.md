@@ -23,7 +23,7 @@ Reports related to the following are in scope:
 
 ### Threat model
 
-`mo` is a local development tool. By default it binds to `localhost` and serves files the user has explicitly opened to that same user's browser. The user already has OS-level read access to anything `mo` can read, so file access by the user (or by the user's browser) over the loopback interface is not considered "unauthorized" and does not by itself constitute path traversal in the security sense. Reports of this shape are out of scope.
+`ml` is a local development tool. By default it binds to `localhost` and serves files the user has explicitly opened to that same user's browser. The user already has OS-level read access to anything `ml` can read, so file access by the user (or by the user's browser) over the loopback interface is not considered "unauthorized" and does not by itself constitute path traversal in the security sense. Reports of this shape are out of scope.
 
 In-scope path traversal requires a path to access from a party that does not already have equivalent filesystem access (for example, via cross-origin requests that bypass browser protections, or via a vector that does not rely on `--dangerously-allow-remote-access`).
 
