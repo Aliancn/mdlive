@@ -1,0 +1,2388 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/bmatcuk/doublestar/v4"
+	"github.com/fswatcher/fswatcher"
+	"github.com/k1LoW/donegroup"
+	"github.com/k1LoW/mo/internal/static"
+	"github.com/k1LoW/mo/version"
+	"golang.org/x/text/collate"
+	"golang.org/x/text/language"
+)
+
+type FileEntry struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+	// Path is the OS-native absolute path. It is what the SPA shows in
+	// tooltips and hands to the clipboard, and what the CLI echoes in its
+	// --json output, so it keeps the host's separator.
+	Path string `json:"path"`
+	// Segments is Path split into components, so no client has to know which
+	// separator the server's OS uses.
+	Segments []string `json:"segments,omitempty"`
+	Title    string   `json:"title,omitempty"`
+	Uploaded bool     `json:"uploaded,omitempty"`
+	content  string   // in-memory content for uploaded files
+}
+
+// pathSegments splits an OS-native path into its components. ToSlash keeps a
+// backslash inside a name intact on platforms where it is a legal character,
+// which a naive split on both separators would corrupt.
+func pathSegments(absPath string) []string {
+	return splitSlashPath(filepath.ToSlash(absPath))
+}
+
+// splitSlashPath splits a forward-slash path, dropping empty components so a
+// rooted POSIX path, a drive letter and a UNC share all yield segments that
+// line up positionally for prefix comparison.
+func splitSlashPath(slashPath string) []string {
+	parts := strings.Split(slashPath, "/")
+	segments := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			segments = append(segments, p)
+		}
+	}
+	if len(segments) == 0 {
+		return nil
+	}
+	return segments
+}
+
+const headFileSizeLimit = 8192
+
+// leadingColumns counts the indentation of line in columns, expanding tabs to
+// the next 4-column tab stop (CommonMark §2.1).
+func leadingColumns(line string) int {
+	col := 0
+	for _, c := range line {
+		switch c {
+		case ' ':
+			col++
+		case '\t':
+			col = (col/4 + 1) * 4
+		default:
+			return col
+		}
+	}
+	return col
+}
+
+// extractTitle returns the text of the first Markdown heading (ATX-style)
+// found in content, or "" if none is found.
+func extractTitle(content string) string {
+	// Track the active fenced code block: fenceChar is '`' or '~' (0 = not in fence),
+	// fenceLen is the opening fence length. CommonMark requires the closing fence to
+	// use the same character and be at least as long as the opening fence.
+	fenceChar := byte(0)
+	fenceLen := 0
+	for line := range strings.SplitSeq(content, "\n") {
+		// CommonMark §4.6: lines with 4+ columns of leading indentation (spaces or tabs)
+		// are indented code blocks and must not be parsed as headings.
+		if leadingColumns(line) >= 4 {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+
+		if fenceChar != 0 {
+			// Inside a fenced code block: look for a matching closing fence.
+			if len(trimmed) > 0 && trimmed[0] == fenceChar {
+				fl := len(trimmed) - len(strings.TrimLeft(trimmed, string(fenceChar)))
+				// Closing fence: same char, >= opening length, no trailing non-space.
+				if fl >= fenceLen && strings.TrimLeft(trimmed[fl:], " \t") == "" {
+					fenceChar = 0
+					fenceLen = 0
+				}
+			}
+			continue
+		}
+
+		// Detect fence opening: 3+ consecutive backticks or tildes.
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			fc := trimmed[0]
+			fl := len(trimmed) - len(strings.TrimLeft(trimmed, string(fc)))
+			fenceChar = fc
+			fenceLen = fl
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "#") {
+			// CommonMark: ATX headings have 1–6 '#' characters.
+			hashes := len(trimmed) - len(strings.TrimLeft(trimmed, "#"))
+			if hashes > 6 {
+				continue
+			}
+			after := trimmed[hashes:]
+			// ATX headings require a space or tab after the # sequence (CommonMark spec).
+			if len(after) == 0 || (after[0] != ' ' && after[0] != '\t') {
+				continue
+			}
+			title := strings.TrimSpace(after)
+			// Strip optional closing # sequence: "Title ###" → "Title" (CommonMark §4.2).
+			// If the entire trimmed content is #s (e.g. "# ###"), the heading is empty.
+			if len(title) > 0 && title[len(title)-1] == '#' {
+				i := len(title)
+				for i > 0 && title[i-1] == '#' {
+					i--
+				}
+				if i == 0 || (title[i-1] == ' ' || title[i-1] == '\t') {
+					if i == 0 {
+						title = ""
+					} else {
+						title = strings.TrimRight(title[:i], " \t")
+					}
+				}
+			}
+			if title != "" {
+				return title
+			}
+		}
+	}
+	return ""
+}
+
+// extractTitleFromFile reads the first 8KB of the file and extracts the title.
+// Returns ("", false) on read error so callers can skip updating stored titles.
+func extractTitleFromFile(path string) (string, bool) {
+	f, err := os.Open(path) //nolint:gosec
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, headFileSizeLimit))
+	if err != nil {
+		return "", false
+	}
+	return extractTitle(string(data)), true
+}
+
+// FileID generates a deterministic file ID from an absolute path.
+// The ID is the first 8 characters of the SHA-256 hex digest.
+func FileID(absPath string) string {
+	h := sha256.Sum256([]byte(absPath))
+	return hex.EncodeToString(h[:])[:8]
+}
+
+type Group struct {
+	Name  string       `json:"name"`
+	Files []*FileEntry `json:"files"`
+}
+
+type sseEvent struct {
+	Name string // SSE event name
+	Data string // SSE data payload (JSON)
+}
+
+const (
+	eventUpdate      = "update"
+	eventFileChanged = "file-changed"
+)
+
+// watchOps is the set of fswatcher ops the watch loop reacts to.
+// Chmod is intentionally excluded because the loop ignores it.
+const watchOps = fswatcher.Create | fswatcher.Write | fswatcher.Remove | fswatcher.Rename
+
+// GlobPattern represents a glob pattern being watched for new files.
+type GlobPattern struct {
+	Pattern      string // Absolute glob pattern
+	PatternSlash string // Pre-converted to forward slashes for doublestar matching
+	BaseDir      string // Base directory extracted via SplitPattern
+	Group        string // Target group for matched files
+}
+
+// IsRecursive returns true if the pattern contains ** for recursive matching.
+func (gp *GlobPattern) IsRecursive() bool {
+	return strings.Contains(gp.Pattern, "**")
+}
+
+type State struct {
+	mu           sync.RWMutex
+	groups       map[string]*Group
+	subscribers  map[chan sseEvent]struct{}
+	subMu        sync.RWMutex
+	watcher      *fswatcher.Watcher
+	restartCh    chan string
+	shutdownCh   chan struct{}
+	patterns     []*GlobPattern
+	watchedDirs  map[string]int // directory → reference count
+	watchTargets map[string]int
+	// pathAliases maps a canonical (symlink-resolved) path back to the
+	// original paths we stored. The fswatcher watcher canonicalizes paths,
+	// so events arrive with the resolved form (e.g. /private/var/...) while
+	// our state keeps the user-facing form (/var/...). This mapping lets
+	// the watch loop translate event paths back to their stored keys.
+	pathAliases map[string]map[string]struct{}
+	// aliasReverse maps the original path to its canonical form, so an
+	// entry can be removed without re-running EvalSymlinks (which would
+	// fail once the underlying file or directory is gone).
+	aliasReverse map[string]string
+	// watchedFiles and fileWatchTargets mirror watchedDirs and watchTargets on
+	// the file side. One physical file reachable through several symlink
+	// aliases has one entry per alias path but only one watch, so the logical
+	// paths and the physical watch target have to be counted separately.
+	watchedFiles     map[string]int
+	fileWatchTargets map[string]int
+
+	fileChangeDebounce time.Duration
+	fileChangeTimers   map[string]*time.Timer
+
+	backupCh     chan struct{}     // dirty signal (buffered, size 1)
+	backupSaveFn func(RestoreData) // backup write callback
+	backupDone   chan struct{}     // closed when backupLoop exits
+}
+
+const defaultFileChangeDebounce = 200 * time.Millisecond
+
+func NewState(ctx context.Context) *State {
+	w, err := fswatcher.NewWatcher()
+	if err != nil {
+		slog.Warn("failed to create file watcher", "error", err)
+	}
+
+	s := &State{
+		groups:             make(map[string]*Group),
+		subscribers:        make(map[chan sseEvent]struct{}),
+		watcher:            w,
+		restartCh:          make(chan string, 1),
+		shutdownCh:         make(chan struct{}, 1),
+		watchedDirs:        make(map[string]int),
+		watchTargets:       make(map[string]int),
+		pathAliases:        make(map[string]map[string]struct{}),
+		aliasReverse:       make(map[string]string),
+		watchedFiles:       make(map[string]int),
+		fileWatchTargets:   make(map[string]int),
+		fileChangeDebounce: defaultFileChangeDebounce,
+		fileChangeTimers:   make(map[string]*time.Timer),
+	}
+
+	if w != nil {
+		donegroup.Go(ctx, func() error {
+			s.watchLoop()
+			return nil
+		})
+	}
+
+	return s
+}
+
+// ErrBinaryFile is returned when a file is detected as binary.
+var ErrBinaryFile = errors.New("binary file is not supported")
+
+// ErrFileNotFound is returned when a file is not found in the specified group.
+var ErrFileNotFound = errors.New("file not found")
+
+// readFileHead reads the first 8KB of the file at path.
+// Returns the bytes read and any error (os.ErrNotExist is passed through).
+// Non-regular files return an error.
+func readFileHead(path string) ([]byte, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file: %s", path)
+	}
+	f, err := os.Open(path) //nolint:gosec
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, headFileSizeLimit))
+}
+
+func (s *State) AddFile(absPath, groupName string) (*FileEntry, error) {
+	// Check for duplicates before doing any I/O.
+	s.mu.RLock()
+	if g, ok := s.groups[groupName]; ok {
+		for _, f := range g.Files {
+			if f.Path == absPath {
+				s.mu.RUnlock()
+				return f, nil
+			}
+		}
+	}
+	s.mu.RUnlock()
+
+	// Read file head once for both binary check and title extraction.
+	head, err := readFileHead(absPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to read file %s: %w", absPath, err)
+		}
+	} else if len(head) > 0 && bytes.IndexByte(head, 0) >= 0 {
+		return nil, fmt.Errorf("%s: %w", absPath, ErrBinaryFile)
+	}
+
+	title := extractTitle(string(head))
+	var canonical string
+	if s.watcher != nil {
+		canonical = resolvePathAlias(absPath)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	g, ok := s.groups[groupName]
+	if !ok {
+		g = &Group{Name: groupName}
+		s.groups[groupName] = g
+	}
+
+	// Re-check after re-acquiring the lock.
+	for _, f := range g.Files {
+		if f.Path == absPath {
+			return f, nil
+		}
+	}
+
+	entry := &FileEntry{
+		Name:     filepath.Base(absPath),
+		ID:       FileID(absPath),
+		Path:     absPath,
+		Segments: pathSegments(absPath),
+		Title:    title,
+	}
+	g.Files = append(g.Files, entry)
+
+	if s.watcher != nil {
+		s.addFileWatch(absPath, canonical)
+	}
+
+	slog.Info("file added", "path", absPath, "group", groupName, "id", entry.ID) //nolint:gosec // G706: structured logging fields, no injection risk
+
+	s.sendEvent(sseEvent{Name: eventUpdate, Data: "{}"})
+	return entry, nil
+}
+
+func (s *State) AddUploadedFile(name, content, groupName string) *FileEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	h := sha256.New()
+	h.Write([]byte("upload:"))
+	h.Write([]byte(content))
+	id := "u" + hex.EncodeToString(h.Sum(nil))[:7]
+
+	g, ok := s.groups[groupName]
+	if !ok {
+		g = &Group{Name: groupName}
+		s.groups[groupName] = g
+	}
+
+	// Check for duplicate within the target group only (consistent with AddFile)
+	for _, f := range g.Files {
+		if f.ID == id {
+			return f
+		}
+	}
+
+	head := content
+	if len(head) > headFileSizeLimit {
+		head = head[:headFileSizeLimit]
+	}
+	title := extractTitle(head)
+
+	entry := &FileEntry{
+		Name:     name,
+		ID:       id,
+		Title:    title,
+		Uploaded: true,
+		content:  content,
+	}
+	g.Files = append(g.Files, entry)
+
+	slog.Info("uploaded file added", "name", name, "group", groupName, "id", entry.ID) //nolint:gosec // G706: structured logging fields, no injection risk
+
+	s.sendEvent(sseEvent{Name: eventUpdate, Data: "{}"})
+	return entry
+}
+
+func (s *State) Groups() []Group {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Deep-copy each Group and its FileEntry pointers while holding the lock
+	// so callers (e.g. JSON encoding after the lock is released) never share
+	// state with in-place mutations such as notifyFileChangedByPath's Title
+	// updates or RemoveFilesByPath's slice compaction. Segments is cloned for
+	// the same reason: nothing mutates it today, but the returned entries
+	// outlive the lock, so relying on every caller leaving it alone would put
+	// the guarantee back in the callers' hands.
+	result := make([]Group, 0, len(s.groups))
+	for _, g := range s.groups {
+		var files []*FileEntry
+		if g.Files != nil {
+			files = make([]*FileEntry, len(g.Files))
+			for i, f := range g.Files {
+				fc := *f
+				fc.Segments = slices.Clone(f.Segments)
+				files[i] = &fc
+			}
+		}
+		gc := *g
+		gc.Files = files
+		result = append(result, gc)
+	}
+	return result
+}
+
+func (s *State) FindFile(id, groupName string) *FileEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if g, ok := s.groups[groupName]; ok {
+		for _, f := range g.Files {
+			if f.ID == id {
+				return f
+			}
+		}
+	}
+	return nil
+}
+
+func (s *State) ReorderFiles(groupName string, fileIDs []string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	g, ok := s.groups[groupName]
+	if !ok {
+		return false
+	}
+
+	if len(fileIDs) != len(g.Files) {
+		return false
+	}
+
+	idToFile := make(map[string]*FileEntry, len(g.Files))
+	for _, f := range g.Files {
+		idToFile[f.ID] = f
+	}
+
+	reordered := make([]*FileEntry, 0, len(fileIDs))
+	for _, id := range fileIDs {
+		f, ok := idToFile[id]
+		if !ok {
+			return false
+		}
+		reordered = append(reordered, f)
+	}
+
+	g.Files = reordered
+	s.sendEvent(sseEvent{Name: eventUpdate, Data: "{}"})
+	return true
+}
+
+func (s *State) MoveFile(id, sourceGroupName, targetGroup string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var file *FileEntry
+	var sourceGroup *Group
+	if g, ok := s.groups[sourceGroupName]; ok {
+		for _, f := range g.Files {
+			if f.ID == id {
+				file = f
+				sourceGroup = g
+				break
+			}
+		}
+	}
+	if file == nil {
+		return ErrFileNotFound
+	}
+
+	if sourceGroupName == targetGroup {
+		return fmt.Errorf("file is already in group %q", targetGroup)
+	}
+
+	// Check for duplicate in target group (by path for filesystem files, by ID for uploaded files)
+	if tg, ok := s.groups[targetGroup]; ok {
+		for _, f := range tg.Files {
+			if file.Uploaded {
+				if f.ID == file.ID {
+					return fmt.Errorf("file %q already exists in group %q", file.Name, targetGroup)
+				}
+			} else {
+				if f.Path == file.Path {
+					return fmt.Errorf("file %q already exists in group %q", file.Name, targetGroup)
+				}
+			}
+		}
+	}
+
+	// Remove from source group
+	for i, f := range sourceGroup.Files {
+		if f.ID == id {
+			sourceGroup.Files = append(sourceGroup.Files[:i], sourceGroup.Files[i+1:]...)
+			break
+		}
+	}
+	if len(sourceGroup.Files) == 0 && !s.groupHasPatterns(sourceGroupName) {
+		delete(s.groups, sourceGroupName)
+	}
+
+	// Add to target group
+	tg, ok := s.groups[targetGroup]
+	if !ok {
+		tg = &Group{Name: targetGroup}
+		s.groups[targetGroup] = tg
+	}
+	tg.Files = append(tg.Files, file)
+
+	s.sendEvent(sseEvent{Name: eventUpdate, Data: "{}"})
+	return nil
+}
+
+// RemoveFilesByPath removes every file entry whose path matches absPath across
+// all groups, cleans up the watcher, and drops any groups left empty without
+// patterns. Returns true if at least one entry was removed.
+func (s *State) RemoveFilesByPath(absPath string) bool {
+	if absPath == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	removedCount := 0
+	for name, g := range s.groups {
+		filtered := g.Files[:0]
+		for _, f := range g.Files {
+			if f.Path == absPath {
+				removedCount++
+				slog.Info("file removed", "path", f.Path, "id", f.ID, "group", name) //nolint:gosec // G706: structured logging fields, no injection risk
+				continue
+			}
+			filtered = append(filtered, f)
+		}
+		// Clear the truncated tail so removed *FileEntry pointers don't linger
+		// in the backing array and block GC.
+		for i := len(filtered); i < len(g.Files); i++ {
+			g.Files[i] = nil
+		}
+		g.Files = filtered
+		if len(g.Files) == 0 && !s.groupHasPatterns(name) {
+			delete(s.groups, name)
+		}
+	}
+	if s.watcher != nil {
+		for range removedCount {
+			s.removeFileWatch(absPath)
+		}
+	}
+	s.mu.Unlock()
+
+	removed := removedCount > 0
+	if removed {
+		s.sendEvent(sseEvent{Name: eventUpdate, Data: "{}"})
+	}
+	return removed
+}
+
+func (s *State) RemoveFile(id, groupName string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var removedPath string
+	found := false
+	if g, ok := s.groups[groupName]; ok {
+		for i, f := range g.Files {
+			if f.ID == id {
+				removedPath = f.Path
+				g.Files = append(g.Files[:i], g.Files[i+1:]...)
+				if len(g.Files) == 0 && !s.groupHasPatterns(groupName) {
+					delete(s.groups, groupName)
+				}
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		return false
+	}
+
+	slog.Info("file removed", "path", removedPath, "id", id) //nolint:gosec // G706: removedPath is from internal state, not direct user input
+
+	if s.watcher != nil && removedPath != "" {
+		s.removeFileWatch(removedPath)
+	}
+
+	s.sendEvent(sseEvent{Name: eventUpdate, Data: "{}"})
+	return true
+}
+
+func (s *State) Subscribe() chan sseEvent {
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+
+	ch := make(chan sseEvent, 16)
+	s.subscribers[ch] = struct{}{}
+	return ch
+}
+
+func (s *State) Unsubscribe(ch chan sseEvent) {
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+
+	if _, ok := s.subscribers[ch]; ok {
+		delete(s.subscribers, ch)
+		close(ch)
+	}
+}
+
+// CloseAllSubscribers closes all SSE subscriber channels so that
+// SSE handlers return and in-flight requests complete before Shutdown.
+func (s *State) CloseAllSubscribers() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.subMu.Lock()
+	for ch := range s.subscribers {
+		close(ch)
+		delete(s.subscribers, ch)
+	}
+	s.subMu.Unlock()
+
+	if s.watcher != nil {
+		s.watcher.Close()
+	}
+	for path, timer := range s.fileChangeTimers {
+		timer.Stop()
+		delete(s.fileChangeTimers, path)
+	}
+}
+
+// RestartCh returns a channel that receives the restore file path when a restart is requested.
+func (s *State) RestartCh() <-chan string {
+	return s.restartCh
+}
+
+// ShutdownCh returns a channel that signals when a shutdown is requested via API.
+func (s *State) ShutdownCh() <-chan struct{} {
+	return s.shutdownCh
+}
+
+// AddPattern registers a glob pattern for automatic file discovery.
+// It performs an initial expansion to add existing matches and starts
+// watching the base directory for new files.
+func (s *State) AddPattern(absPattern, groupName string) ([]*FileEntry, error) {
+	// Use forward slashes for doublestar
+	dsPattern := filepath.ToSlash(absPattern)
+	base, relPat := doublestar.SplitPattern(dsPattern)
+	base = filepath.FromSlash(base)
+
+	info, err := os.Stat(base)
+	if err != nil {
+		return nil, fmt.Errorf("base directory %q does not exist: %w", base, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("base path %q is not a directory", base)
+	}
+
+	gp, createdGroup, added := func() (*GlobPattern, bool, bool) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, p := range s.patterns {
+			if p.Pattern == absPattern && p.Group == groupName {
+				return nil, false, false
+			}
+		}
+		gp := &GlobPattern{
+			Pattern:      absPattern,
+			PatternSlash: dsPattern,
+			BaseDir:      base,
+			Group:        groupName,
+		}
+		s.patterns = append(s.patterns, gp)
+		// Ensure the group exists even if no files match yet.
+		createdGroup := false
+		if _, ok := s.groups[groupName]; !ok {
+			s.groups[groupName] = &Group{Name: groupName}
+			createdGroup = true
+		}
+		return gp, createdGroup, true
+	}()
+	if !added {
+		return nil, nil
+	}
+
+	// Initial expansion
+	var matches []string
+	if gp.IsRecursive() {
+		var matchErr error
+		_, err = walkSymlinkTree(base, nil, func(path string) {
+			if matchErr != nil {
+				return
+			}
+			matched, err := doublestar.Match(dsPattern, filepath.ToSlash(path))
+			if err != nil {
+				matchErr = err
+				return
+			}
+			if matched {
+				// Alias paths are kept as distinct matches rather than collapsed
+				// onto their canonical form. FileID is derived from the path, so
+				// collapsing would make the surviving ID depend on ReadDir order
+				// and break deep links and session restore, and preferring the
+				// canonical form would move an entry outside the watched tree.
+				rel, err := filepath.Rel(base, path)
+				if err == nil {
+					matches = append(matches, rel)
+				}
+			}
+		})
+		if err == nil {
+			err = matchErr
+		}
+	} else {
+		matches, err = doublestar.Glob(os.DirFS(base), relPat, doublestar.WithFilesOnly())
+	}
+	if err != nil {
+		s.rollbackPattern(gp, createdGroup)
+		return nil, fmt.Errorf("glob expansion failed: %w", err)
+	}
+	collate.New(language.Und, collate.Numeric).SortStrings(matches)
+
+	var entries []*FileEntry
+	for _, m := range matches {
+		abs := filepath.Join(base, m)
+		entry, err := s.AddFile(abs, groupName)
+		if err != nil {
+			slog.Warn("skipping file", "path", abs, "error", err)
+			continue
+		}
+		entries = append(entries, entry)
+	}
+
+	s.watchDirsForPattern(gp)
+
+	return entries, nil
+}
+
+// Patterns returns a copy of all registered glob patterns.
+func (s *State) Patterns() []*GlobPattern {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]*GlobPattern, len(s.patterns))
+	copy(result, s.patterns)
+	return result
+}
+
+// PatternsForGroup returns the pattern strings for a specific group.
+func (s *State) PatternsForGroup(groupName string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var result []string
+	for _, p := range s.patterns {
+		if p.Group == groupName {
+			result = append(result, p.Pattern)
+		}
+	}
+	return result
+}
+
+// RemovePattern removes a glob pattern from the watch list.
+// Returns true if the pattern was found and removed.
+func (s *State) RemovePattern(absPattern, groupName string) bool {
+	var removed *GlobPattern
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for i, p := range s.patterns {
+			if p.Pattern == absPattern && p.Group == groupName {
+				removed = p
+				s.patterns = append(s.patterns[:i], s.patterns[i+1:]...)
+				break
+			}
+		}
+	}()
+
+	if removed == nil {
+		return false
+	}
+
+	s.walkDirsForPattern(removed, s.removeDirWatch)
+
+	slog.Info("pattern removed", "pattern", absPattern, "group", groupName)
+	s.mu.Lock()
+	// Clean up empty group when last pattern is removed and no files remain.
+	if g, ok := s.groups[groupName]; ok && len(g.Files) == 0 && !s.groupHasPatterns(groupName) {
+		delete(s.groups, groupName)
+	}
+	s.sendEvent(sseEvent{Name: eventUpdate, Data: "{}"})
+	s.mu.Unlock()
+	return true
+}
+
+// UploadedFileData represents an uploaded file's content for persistence.
+type UploadedFileData struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
+	Group   string `json:"group"`
+}
+
+// RestoreData represents the state to be persisted across restarts.
+type RestoreData struct {
+	Groups        map[string][]string `json:"groups"`
+	Patterns      map[string][]string `json:"patterns,omitempty"`
+	UploadedFiles []UploadedFileData  `json:"uploadedFiles,omitempty"`
+}
+
+// WriteRestoreFile writes RestoreData to a temporary file and returns the path.
+func WriteRestoreFile(data RestoreData) (string, error) {
+	f, err := os.CreateTemp("", "mo-restore-*.json")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer f.Close()
+
+	if err := json.NewEncoder(f).Encode(data); err != nil {
+		os.Remove(f.Name()) //nolint:gosec // Path is from our own CreateTemp, not user-supplied
+		return "", fmt.Errorf("failed to write restore data: %w", err)
+	}
+
+	return f.Name(), nil
+}
+
+// ExportState writes the current groups, file paths, and patterns to a temporary file and returns the path.
+func (s *State) ExportState() (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return WriteRestoreFile(s.snapshotRestoreData())
+}
+
+// EnableBackup starts a background goroutine that periodically saves state
+// via the provided callback when state changes are detected.
+func (s *State) EnableBackup(ctx context.Context, saveFn func(RestoreData)) {
+	s.backupCh = make(chan struct{}, 1)
+	s.backupSaveFn = saveFn
+	s.backupDone = make(chan struct{})
+	donegroup.Go(ctx, func() error {
+		defer close(s.backupDone)
+		s.backupLoop(ctx)
+		return nil
+	})
+}
+
+// snapshotRestoreData creates a RestoreData snapshot of the current state.
+// Caller must hold s.mu (at least RLock).
+func (s *State) snapshotRestoreData() RestoreData {
+	data := RestoreData{
+		Groups: make(map[string][]string, len(s.groups)),
+	}
+	for name, g := range s.groups {
+		paths := make([]string, 0, len(g.Files))
+		for _, f := range g.Files {
+			if f.Uploaded {
+				data.UploadedFiles = append(data.UploadedFiles, UploadedFileData{
+					Name:    f.Name,
+					Content: f.content,
+					Group:   name,
+				})
+				continue
+			}
+			paths = append(paths, f.Path)
+		}
+		data.Groups[name] = paths
+	}
+
+	if len(s.patterns) > 0 {
+		data.Patterns = make(map[string][]string)
+		for _, p := range s.patterns {
+			data.Patterns[p.Group] = append(data.Patterns[p.Group], p.Pattern)
+		}
+	}
+
+	return data
+}
+
+// markDirty signals that state has changed and a backup save is needed.
+// Non-blocking: safe to call while holding s.mu.
+func (s *State) markDirty() {
+	if s.backupCh == nil {
+		return
+	}
+	select {
+	case s.backupCh <- struct{}{}:
+	default:
+	}
+}
+
+func (s *State) backupLoop(ctx context.Context) {
+	const debounce = 1 * time.Second
+	timer := time.NewTimer(debounce)
+	timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			s.saveBackup()
+			return
+		case _, ok := <-s.backupCh:
+			if !ok {
+				return
+			}
+			timer.Reset(debounce)
+		case <-timer.C:
+			s.saveBackup()
+		}
+	}
+}
+
+func (s *State) saveBackup() {
+	if s.backupSaveFn == nil {
+		return
+	}
+	s.mu.RLock()
+	data := s.snapshotRestoreData()
+	s.mu.RUnlock()
+	s.backupSaveFn(data)
+}
+
+// groupHasPatterns reports whether the group has any registered watch patterns.
+// Caller must hold s.mu.
+func (s *State) groupHasPatterns(groupName string) bool {
+	for _, p := range s.patterns {
+		if p.Group == groupName {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *State) walkDirsForPattern(gp *GlobPattern, fn func(string)) {
+	if s.watcher == nil {
+		return
+	}
+	if !gp.IsRecursive() {
+		fn(gp.BaseDir)
+		return
+	}
+
+	unresolved, err := walkSymlinkTree(gp.BaseDir, fn, nil)
+	// Entries that could not be classified never reached fn, so hand over the
+	// ones already tracked as watched directories. Without this, unwatch cannot
+	// decrement the refcount of a directory that stopped resolving after its
+	// watch was set up, and the watch on its canonical target is never released.
+	// The rest are skipped because unresolved also covers non-directory entries
+	// such as dangling file symlinks, which have no refcount to release and
+	// would only produce a failed watch and a misleading warning on the add
+	// path.
+	for _, path := range unresolved {
+		if s.isWatchedDir(path) {
+			fn(path)
+		}
+	}
+	if err != nil {
+		slog.Warn("failed to walk directories for pattern", "pattern", gp.Pattern, "base", gp.BaseDir, "error", err)
+	}
+}
+
+// removeFileWatch releases one logical reference to a file path and drops the
+// physical watch only once no alias of the same target remains.
+// Caller must hold s.mu for write.
+func (s *State) removeFileWatch(absPath string) {
+	count, ok := s.watchedFiles[absPath]
+	if !ok {
+		return
+	}
+	if count > 1 {
+		s.watchedFiles[absPath] = count - 1
+		return
+	}
+
+	delete(s.watchedFiles, absPath)
+	target := absPath
+	if canonical, ok := s.aliasReverse[absPath]; ok {
+		target = canonical
+	}
+	s.unregisterPathAlias(absPath)
+
+	targetCount := s.fileWatchTargets[target]
+	if targetCount > 1 {
+		s.fileWatchTargets[target] = targetCount - 1
+		return
+	}
+	delete(s.fileWatchTargets, target)
+	if s.watcher != nil {
+		if err := s.watcher.Remove(target); err != nil {
+			slog.Warn("failed to unwatch file", "path", absPath, "target", target, "error", err)
+		}
+	}
+}
+
+func (s *State) removeDirWatch(dir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count, ok := s.watchedDirs[dir]
+	if !ok {
+		return
+	}
+	if count > 1 {
+		s.watchedDirs[dir] = count - 1
+		return
+	}
+
+	delete(s.watchedDirs, dir)
+	target := dir
+	if canonical, ok := s.aliasReverse[dir]; ok {
+		target = canonical
+	}
+	s.unregisterPathAlias(dir)
+
+	targetCount := s.watchTargets[target]
+	if targetCount > 1 {
+		s.watchTargets[target] = targetCount - 1
+		return
+	}
+	delete(s.watchTargets, target)
+	if s.watcher != nil {
+		if err := s.watcher.Remove(target); err != nil {
+			slog.Warn("failed to remove directory watch", "dir", dir, "target", target, "error", err)
+		}
+	}
+}
+
+func (s *State) watchLoop() {
+	for {
+		select {
+		case event, ok := <-s.watcher.Events:
+			if !ok {
+				return
+			}
+			for _, eventPath := range s.translateEventPaths(event.Name) {
+				refs := s.findRefsByPath(eventPath)
+				if len(refs) > 0 {
+					if event.Op.Has(fswatcher.Write) || event.Op.Has(fswatcher.Create) {
+						slog.Info("file changed", "path", eventPath)
+						s.scheduleFileChanged(eventPath)
+					}
+					// Editors using atomic save (write-to-temp + rename) cause
+					// the original inode to disappear, which removes the watch on
+					// some backends. Stat the path to decide whether the file is
+					// actually gone, then re-add the watch if it still exists.
+					// FSEvents on macOS coalesces historical flags, so a plain
+					// Write after a previous atomic save arrives as Write|Rename;
+					// trusting Add's error to mean "file gone" wrongly drops the
+					// entry (ErrAlreadyAdded for a still-live watch).
+					if event.Op.Has(fswatcher.Remove) || event.Op.Has(fswatcher.Rename) {
+						time.AfterFunc(100*time.Millisecond, func() {
+							if _, statErr := os.Stat(eventPath); errors.Is(statErr, os.ErrNotExist) {
+								slog.Info("file deleted, removing from list", "path", eventPath)
+								for _, ref := range refs {
+									s.RemoveFile(ref.ID, ref.Group)
+								}
+								return
+							}
+							if err := s.watcher.Add(eventPath, watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
+								slog.Warn("failed to re-watch file", "path", eventPath, "error", err)
+								return
+							}
+							slog.Info("re-watching file", "path", eventPath)
+							s.scheduleFileChanged(eventPath)
+						})
+					}
+				}
+				if event.Op.Has(fswatcher.Rename) || event.Op.Has(fswatcher.Remove) {
+					if s.isWatchedDir(eventPath) {
+						s.handleDirMove(eventPath)
+					}
+				}
+				if event.Op.Has(fswatcher.Create) {
+					s.handleCreateForGlobs(eventPath)
+				}
+			}
+		case err, ok := <-s.watcher.Errors:
+			if !ok {
+				return
+			}
+			slog.Warn("file watcher error", "error", err)
+		}
+	}
+}
+
+func (s *State) scheduleFileChanged(absPath string) {
+	if s.fileChangeDebounce <= 0 {
+		s.notifyFileChangedByPath(absPath)
+		return
+	}
+
+	s.mu.Lock()
+	if timer, ok := s.fileChangeTimers[absPath]; ok {
+		timer.Stop()
+	}
+	debounce := s.fileChangeDebounce
+	var timer *time.Timer
+	timer = time.AfterFunc(debounce, func() {
+		s.mu.Lock()
+		current, ok := s.fileChangeTimers[absPath]
+		if ok && current == timer {
+			delete(s.fileChangeTimers, absPath)
+		}
+		s.mu.Unlock()
+		if ok && current == timer {
+			s.notifyFileChangedByPath(absPath)
+		}
+	})
+	s.fileChangeTimers[absPath] = timer
+	s.mu.Unlock()
+}
+
+func (s *State) notifyFileChangedByPath(absPath string) {
+	// Extract the title outside the lock (file I/O should not hold the mutex).
+	newTitle, titleOK := extractTitleFromFile(absPath)
+
+	// Single lock pass: collect IDs and update titles together.
+	var ids []string
+	titleChanged := false
+	s.mu.Lock()
+	for _, g := range s.groups {
+		for _, entry := range g.Files {
+			if entry.Path == absPath {
+				ids = append(ids, entry.ID)
+				if titleOK && entry.Title != newTitle {
+					entry.Title = newTitle
+					titleChanged = true
+				}
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	if len(ids) == 0 {
+		return
+	}
+	if titleChanged {
+		s.sendEvent(sseEvent{Name: eventUpdate, Data: "{}"})
+	}
+	s.notifyFileChanged(ids)
+}
+
+func (s *State) notifyFileChanged(ids []string) {
+	for _, id := range ids {
+		b, err := json.Marshal(struct {
+			ID string `json:"id"`
+		}{ID: id})
+		if err != nil {
+			slog.Error("notifyFileChanged", "err", err)
+			continue
+		}
+		s.sendEvent(sseEvent{
+			Name: eventFileChanged,
+			Data: string(b),
+		})
+	}
+}
+
+type fileRef struct {
+	ID    string
+	Group string
+}
+
+// resolvePathAlias returns the canonical (symlink-resolved) form of orig
+// when it differs from orig, or "" otherwise. Performs filesystem I/O, so
+// callers should invoke it outside any critical section.
+func resolvePathAlias(orig string) string {
+	canonical, err := filepath.EvalSymlinks(orig)
+	if err != nil || canonical == orig {
+		return ""
+	}
+	return canonical
+}
+
+// registerPathAlias records canonical → orig (and the reverse) so watcher
+// events can be mapped back to the stored path. canonical must be the
+// pre-resolved value returned by resolvePathAlias. Caller must hold s.mu
+// for write.
+func (s *State) registerPathAlias(orig, canonical string) {
+	if canonical == "" {
+		return
+	}
+	if s.pathAliases == nil {
+		s.pathAliases = make(map[string]map[string]struct{})
+	}
+	if s.aliasReverse == nil {
+		s.aliasReverse = make(map[string]string)
+	}
+	if s.pathAliases[canonical] == nil {
+		s.pathAliases[canonical] = make(map[string]struct{})
+	}
+	s.pathAliases[canonical][orig] = struct{}{}
+	s.aliasReverse[orig] = canonical
+}
+
+// unregisterPathAlias removes any alias previously registered for orig.
+// Caller must hold s.mu for write.
+func (s *State) unregisterPathAlias(orig string) {
+	canonical, ok := s.aliasReverse[orig]
+	if !ok {
+		return
+	}
+	delete(s.pathAliases[canonical], orig)
+	if len(s.pathAliases[canonical]) == 0 {
+		delete(s.pathAliases, canonical)
+	}
+	delete(s.aliasReverse, orig)
+}
+
+// translateEventPaths returns every stored form of an event path alongside
+// the canonical path reported by the watcher.
+func (s *State) translateEventPaths(p string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	paths := []string{p}
+	seen := map[string]struct{}{p: {}}
+	dir := p
+	for {
+		for orig := range s.pathAliases[dir] {
+			rel, err := filepath.Rel(dir, p)
+			if err == nil {
+				translated := filepath.Join(orig, rel)
+				if _, ok := seen[translated]; !ok {
+					seen[translated] = struct{}{}
+					paths = append(paths, translated)
+				}
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return paths
+		}
+		dir = parent
+	}
+}
+
+func (s *State) findRefsByPath(absPath string) []fileRef {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var refs []fileRef
+	for _, g := range s.groups {
+		for _, f := range g.Files {
+			if f.Path == absPath {
+				refs = append(refs, fileRef{ID: f.ID, Group: g.Name})
+			}
+		}
+	}
+	return refs
+}
+
+func (s *State) findRefsByPathPrefix(dirPath string) []fileRef {
+	prefix := dirPath + string(filepath.Separator)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var refs []fileRef
+	for _, g := range s.groups {
+		for _, f := range g.Files {
+			if strings.HasPrefix(f.Path, prefix) {
+				refs = append(refs, fileRef{ID: f.ID, Group: g.Name})
+			}
+		}
+	}
+	return refs
+}
+
+func (s *State) isWatchedDir(path string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.watchedDirs[path]
+	return ok
+}
+
+func (s *State) handleDirMove(dirPath string) {
+	refs := s.findRefsByPathPrefix(dirPath)
+	for _, ref := range refs {
+		slog.Info("removing stale file after directory move", "dir", dirPath, "id", ref.ID)
+		s.RemoveFile(ref.ID, ref.Group)
+	}
+}
+
+func (s *State) sendEvent(e sseEvent) {
+	s.subMu.RLock()
+	defer s.subMu.RUnlock()
+
+	for ch := range s.subscribers {
+		select {
+		case ch <- e:
+		default:
+			slog.Warn("SSE event dropped (subscriber buffer full)", "event", e.Name)
+		}
+	}
+	if e.Name == eventUpdate {
+		s.markDirty()
+	}
+}
+
+func (s *State) watchDirsForPattern(gp *GlobPattern) {
+	s.walkDirsForPattern(gp, s.addDirWatch)
+}
+
+// rollbackPattern undoes what AddPattern registers before its initial
+// expansion. Without it a failed expansion leaves a pattern that nothing
+// watches: it is reported by the status API and persisted to the backup, and a
+// later RemovePattern walks the tree decrementing refcounts it never
+// incremented, which can release a watch another pattern still needs.
+func (s *State) rollbackPattern(gp *GlobPattern, createdGroup bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, p := range s.patterns {
+		if p == gp {
+			s.patterns = append(s.patterns[:i], s.patterns[i+1:]...)
+			break
+		}
+	}
+	if !createdGroup {
+		return
+	}
+	if g, ok := s.groups[gp.Group]; ok && len(g.Files) == 0 && !s.groupHasPatterns(gp.Group) {
+		delete(s.groups, gp.Group)
+	}
+}
+
+// addFileWatch registers a watch for a file path. Logical paths and the
+// physical watch target are counted separately so that several symlink
+// aliases of one file share a single watch, and removing one alias does not
+// tear down the watch the remaining aliases still rely on.
+// Caller must hold s.mu for write.
+func (s *State) addFileWatch(absPath, canonical string) {
+	target := absPath
+	if canonical != "" {
+		target = canonical
+	}
+	if s.watchedFiles == nil {
+		s.watchedFiles = make(map[string]int)
+	}
+	if s.fileWatchTargets == nil {
+		s.fileWatchTargets = make(map[string]int)
+	}
+	s.watchedFiles[absPath]++
+	if s.watchedFiles[absPath] > 1 {
+		return
+	}
+
+	s.fileWatchTargets[target]++
+	if s.fileWatchTargets[target] > 1 {
+		s.registerPathAlias(absPath, canonical)
+		return
+	}
+	if s.watcher != nil {
+		if err := s.watcher.Add(target, watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
+			delete(s.watchedFiles, absPath)
+			delete(s.fileWatchTargets, target)
+			slog.Warn("failed to watch file", "path", absPath, "target", target, "error", err)
+			return
+		}
+	}
+	s.registerPathAlias(absPath, canonical)
+}
+
+func (s *State) addDirWatch(dir string) {
+	canonical := resolvePathAlias(dir)
+	target := dir
+	if canonical != "" {
+		target = canonical
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.watchedDirs == nil {
+		s.watchedDirs = make(map[string]int)
+	}
+	if s.watchTargets == nil {
+		s.watchTargets = make(map[string]int)
+	}
+	s.watchedDirs[dir]++
+	if s.watchedDirs[dir] > 1 {
+		return
+	}
+
+	s.watchTargets[target]++
+	if s.watchTargets[target] > 1 {
+		s.registerPathAlias(dir, canonical)
+		return
+	}
+	if s.watcher != nil {
+		if err := s.watcher.Add(target, watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
+			delete(s.watchedDirs, dir)
+			delete(s.watchTargets, target)
+			slog.Warn("failed to watch directory", "path", dir, "target", target, "error", err)
+			return
+		}
+	}
+	s.registerPathAlias(dir, canonical)
+}
+
+func (s *State) handleCreateForGlobs(path string) {
+	s.mu.RLock()
+	if len(s.patterns) == 0 {
+		s.mu.RUnlock()
+		return
+	}
+	patterns := make([]*GlobPattern, len(s.patterns))
+	copy(patterns, s.patterns)
+	s.mu.RUnlock()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+
+	if info.IsDir() {
+		watchCount := 0
+		for _, gp := range patterns {
+			if gp.IsRecursive() && pathWithinBase(path, gp.BaseDir) {
+				watchCount++
+			}
+		}
+		if watchCount == 0 {
+			return
+		}
+		if _, err := walkSymlinkTree(path, func(dir string) {
+			for range watchCount {
+				s.addDirWatch(dir)
+			}
+		}, func(file string) {
+			s.matchAndAddFile(file, patterns)
+		}); err != nil {
+			slog.Warn("failed to scan created directory", "path", path, "error", err)
+		}
+		return
+	}
+
+	s.matchAndAddFile(path, patterns)
+}
+
+func pathWithinBase(path, base string) bool {
+	rel, err := filepath.Rel(base, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// walkSymlinkTree walks root, descending through directory symlinks, handing
+// every directory to visitDir and every other entry to visitFile. Paths that
+// could not be classified are returned separately instead of being dropped,
+// because a caller keeping per-directory state still has to reach a directory
+// that vanished between watch setup and teardown.
+func walkSymlinkTree(root string, visitDir, visitFile func(string)) ([]string, error) {
+	var unresolved []string
+	var walk func(string, map[string]struct{}) error
+	walk = func(path string, ancestors map[string]struct{}) error {
+		info, err := os.Stat(path)
+		if err != nil {
+			unresolved = append(unresolved, path)
+			return err
+		}
+		if !info.IsDir() {
+			if visitFile != nil {
+				visitFile(path)
+			}
+			return nil
+		}
+
+		canonical, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			unresolved = append(unresolved, path)
+			return err
+		}
+		if _, ok := ancestors[canonical]; ok {
+			return nil
+		}
+		nextAncestors := make(map[string]struct{}, len(ancestors)+1)
+		for ancestor := range ancestors {
+			nextAncestors[ancestor] = struct{}{}
+		}
+		nextAncestors[canonical] = struct{}{}
+
+		if visitDir != nil {
+			visitDir(path)
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			// path already went to visitDir, so it must not also be reported as
+			// unresolved; teardown would otherwise decrement it twice.
+			return err
+		}
+		for _, entry := range entries {
+			child := filepath.Join(path, entry.Name())
+			if err := walk(child, nextAncestors); err != nil {
+				slog.Warn("failed to walk path", "path", child, "error", err)
+			}
+		}
+		return nil
+	}
+
+	err := walk(root, nil)
+	return unresolved, err
+}
+
+func (s *State) matchAndAddFile(path string, patterns []*GlobPattern) {
+	dsPath := filepath.ToSlash(path)
+	for _, gp := range patterns {
+		matched, err := doublestar.Match(gp.PatternSlash, dsPath)
+		if err != nil {
+			continue
+		}
+		if matched {
+			if _, err := s.AddFile(path, gp.Group); err != nil {
+				slog.Warn("skipping file", "path", path, "error", err)
+				return
+			}
+			slog.Info("auto-added file via glob", "path", path, "pattern", gp.Pattern, "group", gp.Group)
+			return
+		}
+	}
+}
+
+type reorderFilesRequest struct {
+	FileIDs []string `json:"fileIds"`
+}
+
+type moveFileRequest struct {
+	Group string `json:"group"`
+}
+
+type addFileRequest struct {
+	Path string `json:"path"`
+}
+
+type uploadFileRequest struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
+}
+
+type patternRequest struct {
+	Pattern string `json:"pattern"`
+	Group   string `json:"group"`
+}
+
+// AddPatternResponse is the JSON response for the add-pattern endpoint.
+type AddPatternResponse struct {
+	Matched int          `json:"matched"`
+	Files   []*FileEntry `json:"files,omitempty"`
+}
+
+type fileContentResponse struct {
+	Content string `json:"content"`
+	BaseDir string `json:"baseDir"`
+}
+
+type searchAnchor struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+type searchMatch struct {
+	Line    int          `json:"line"`
+	Column  int          `json:"column,omitempty"`
+	Text    string       `json:"text"`
+	Before  []string     `json:"before,omitempty"`
+	After   []string     `json:"after,omitempty"`
+	Heading string       `json:"heading,omitempty"`
+	Anchor  searchAnchor `json:"anchor"`
+}
+
+type searchResult struct {
+	FileID   string        `json:"fileId"`
+	FileName string        `json:"fileName"`
+	Title    string        `json:"title,omitempty"`
+	Path     string        `json:"path"`
+	Uploaded bool          `json:"uploaded"`
+	Matches  []searchMatch `json:"matches"`
+}
+
+type searchResponse struct {
+	Query   string         `json:"query"`
+	Group   string         `json:"group"`
+	Limit   int            `json:"limit"`
+	Context int            `json:"context"`
+	Total   int            `json:"total"`
+	Results []searchResult `json:"results"`
+}
+
+type openFileRequest struct {
+	FileID string `json:"fileId"`
+	Path   string `json:"path"`
+}
+
+// resolveGroupFromPath extracts and validates the group name from the URL path.
+func resolveGroupFromPath(r *http.Request) (string, error) {
+	return ResolveGroupName(r.PathValue("group"))
+}
+
+func NewHandler(state *State) http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("POST /_/api/groups/{group}/files", handleAddFile(state))
+	mux.HandleFunc("POST /_/api/groups/{group}/files/upload", handleUploadFile(state))
+	mux.HandleFunc("DELETE /_/api/groups/{group}/files/{id}", handleRemoveFile(state))
+	mux.HandleFunc("PUT /_/api/groups/{group}/files/{id}/group", handleMoveFile(state))
+	mux.HandleFunc("GET /_/api/groups", handleGroups(state))
+	mux.HandleFunc("PUT /_/api/groups/{group}/reorder", handleReorderFiles(state))
+	mux.HandleFunc("GET /_/api/groups/{group}/files/{id}/content", handleFileContent(state))
+	mux.HandleFunc("GET /_/api/search", handleSearch(state))
+	mux.HandleFunc("GET /_/api/groups/{group}/files/{id}/raw/{path...}", handleFileRaw(state))
+	mux.HandleFunc("POST /_/api/groups/{group}/files/open", handleOpenFile(state))
+	mux.HandleFunc("POST /_/api/patterns", handleAddPattern(state))
+	mux.HandleFunc("DELETE /_/api/patterns", handleRemovePattern(state))
+	mux.HandleFunc("POST /_/api/restart", handleRestart(state))
+	mux.HandleFunc("POST /_/api/shutdown", handleShutdown(state))
+	mux.HandleFunc("GET /_/api/status", handleStatus(state))
+	mux.HandleFunc("GET /_/api/version", handleVersion())
+	mux.HandleFunc("GET /_/events", handleSSE(state))
+	mux.HandleFunc("GET /", handleSPA())
+
+	return withCSP(mux)
+}
+
+func withCSP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self' 'unsafe-eval'; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' https: data:; "+
+				"font-src 'self' data:; "+
+				"connect-src 'self'; "+
+				"object-src 'none'; "+
+				"base-uri 'self'; "+
+				"form-action 'self'; "+
+				"frame-ancestors 'none'")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func handleAddFile(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		group, err := resolveGroupFromPath(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		var req addFileRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		absPath, err := filepath.Abs(req.Path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if _, err := os.Stat(absPath); err != nil {
+			http.Error(w, fmt.Sprintf("file not found: %s", absPath), http.StatusBadRequest)
+			return
+		}
+
+		entry, err := state.AddFile(absPath, group)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(entry); err != nil {
+			slog.Error("failed to encode response", "error", err)
+		}
+	}
+}
+
+func handleUploadFile(state *State) http.HandlerFunc {
+	const maxRequestSize = 12 << 20 // 12MB (headroom for JSON envelope)
+	const maxContentSize = 10 << 20 // 10MB
+	return func(w http.ResponseWriter, r *http.Request) {
+		group, err := resolveGroupFromPath(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+		var req uploadFileRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			// The matched value is discarded because its Limit is maxRequestSize,
+			// the envelope headroom, not the 10MB content limit this message
+			// reports. Only the match itself matters, and handlerrors reads that
+			// blank as a dropped error, hence the suppression.
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok { //nostyle:handlerrors
+				http.Error(w, "file too large (max 10MB)", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Content) > maxContentSize {
+			http.Error(w, "file too large (max 10MB)", http.StatusRequestEntityTooLarge)
+			return
+		}
+
+		if req.Name == "" {
+			http.Error(w, "missing file name", http.StatusBadRequest)
+			return
+		}
+
+		entry := state.AddUploadedFile(req.Name, req.Content, group)
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(entry); err != nil {
+			slog.Error("failed to encode response", "error", err)
+		}
+	}
+}
+
+func handleRemoveFile(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		group, err := resolveGroupFromPath(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		id := r.PathValue("id")
+		if id == "" {
+			http.Error(w, "missing file id", http.StatusBadRequest)
+			return
+		}
+		if !state.RemoveFile(id, group) {
+			http.Error(w, "file not found", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func handleMoveFile(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sourceGroup, err := resolveGroupFromPath(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		id := r.PathValue("id")
+		if id == "" {
+			http.Error(w, "missing file id", http.StatusBadRequest)
+			return
+		}
+		var req moveFileRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		targetGroup, err := ResolveGroupName(req.Group)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := state.MoveFile(id, sourceGroup, targetGroup); err != nil {
+			if errors.Is(err, ErrFileNotFound) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+			} else {
+				http.Error(w, err.Error(), http.StatusConflict)
+			}
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func handleReorderFiles(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		group, err := resolveGroupFromPath(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var req reorderFilesRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !state.ReorderFiles(group, req.FileIDs) {
+			http.Error(w, "invalid file IDs or group not found", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func handleGroups(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		groups := state.Groups()
+		patternsByGroup := make(map[string][]string)
+		for _, p := range state.Patterns() {
+			patternsByGroup[p.Group] = append(patternsByGroup[p.Group], p.Pattern)
+		}
+		result := make([]statusGroup, len(groups))
+		for i, g := range groups {
+			// Pattern-only groups created via AddPattern leave Files as nil,
+			// which encoding/json renders as `"files": null`. The frontend
+			// assumes the field is always an array, so swap a nil slice for
+			// an empty literal. An already-empty non-nil slice is left alone
+			// (encoding/json renders it as `[]` already).
+			if g.Files == nil {
+				g.Files = []*FileEntry{}
+			}
+			result[i] = statusGroup{
+				Group:    g,
+				Patterns: patternsByGroup[g.Name],
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(result); err != nil {
+			slog.Error("failed to encode response", "error", err)
+		}
+	}
+}
+
+func handleFileContent(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		group, err := resolveGroupFromPath(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		id := r.PathValue("id")
+		if id == "" {
+			http.Error(w, "missing file id", http.StatusBadRequest)
+			return
+		}
+
+		entry := state.FindFile(id, group)
+		if entry == nil {
+			http.Error(w, "file not found", http.StatusNotFound)
+			return
+		}
+
+		var resp fileContentResponse
+		if entry.Uploaded {
+			resp = fileContentResponse{
+				Content: entry.content,
+				BaseDir: "",
+			}
+		} else {
+			content, err := os.ReadFile(entry.Path) //nolint:gosec // Path is server-managed, not user-supplied
+			if err != nil {
+				if os.IsNotExist(err) {
+					// File is gone from disk: drop it from state so the group
+					// (and possibly the group itself) disappears from the UI.
+					state.RemoveFilesByPath(entry.Path)
+					http.Error(w, "file not found", http.StatusNotFound)
+					return
+				}
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			resp = fileContentResponse{
+				Content: string(content),
+				BaseDir: filepath.Dir(entry.Path),
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			slog.Error("failed to encode response", "error", err)
+		}
+	}
+}
+
+func handleSearch(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := strings.TrimSpace(r.URL.Query().Get("q"))
+		if q == "" {
+			http.Error(w, "missing search query", http.StatusBadRequest)
+			return
+		}
+
+		groupName, err := ResolveGroupName(r.URL.Query().Get("group"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		limit := 50
+		if v := r.URL.Query().Get("limit"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 {
+				http.Error(w, "invalid limit", http.StatusBadRequest)
+				return
+			}
+			if n > 200 {
+				n = 200
+			}
+			limit = n
+		}
+
+		contextLines := 2
+		if v := r.URL.Query().Get("context"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 {
+				http.Error(w, "invalid context", http.StatusBadRequest)
+				return
+			}
+			if n > 5 {
+				n = 5
+			}
+			contextLines = n
+		}
+
+		groups := state.Groups()
+		var files []*FileEntry
+		found := false
+		for i := range groups {
+			if groups[i].Name == groupName {
+				files = append([]*FileEntry(nil), groups[i].Files...)
+				found = true
+				break
+			}
+		}
+		if !found {
+			http.Error(w, "group not found", http.StatusNotFound)
+			return
+		}
+
+		resp := searchResponse{
+			Query:   q,
+			Group:   groupName,
+			Limit:   limit,
+			Context: contextLines,
+			Results: []searchResult{},
+		}
+
+		needle := strings.ToLower(q)
+		remaining := limit
+		for _, entry := range files {
+			if remaining == 0 {
+				break
+			}
+			content, err := readSearchableContent(entry)
+			if err != nil {
+				slog.Warn("failed to read file for search", "id", entry.ID, "path", entry.Path, "error", err)
+				continue
+			}
+			matches := findSearchMatches(content, needle, contextLines, remaining)
+			if len(matches) == 0 {
+				continue
+			}
+			resp.Results = append(resp.Results, searchResult{
+				FileID:   entry.ID,
+				FileName: entry.Name,
+				Title:    entry.Title,
+				Path:     entry.Path,
+				Uploaded: entry.Uploaded,
+				Matches:  matches,
+			})
+			resp.Total += len(matches)
+			remaining -= len(matches)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			slog.Error("failed to encode response", "error", err)
+		}
+	}
+}
+
+func readSearchableContent(entry *FileEntry) (string, error) {
+	if entry.Uploaded {
+		return entry.content, nil
+	}
+	data, err := os.ReadFile(entry.Path) //nolint:gosec // Path is server-managed, not user-supplied
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func findSearchMatches(content, needle string, contextLines, limit int) []searchMatch {
+	if needle == "" || limit <= 0 {
+		return nil
+	}
+
+	lines := strings.Split(content, "\n")
+	matches := make([]searchMatch, 0)
+	currentHeading := ""
+	fenceChar := byte(0)
+	fenceLen := 0
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		indented := leadingColumns(line) >= 4
+		if fenceChar != 0 {
+			if !indented && len(trimmed) > 0 && trimmed[0] == fenceChar {
+				fl := len(trimmed) - len(strings.TrimLeft(trimmed, string(fenceChar)))
+				if fl >= fenceLen && strings.TrimLeft(trimmed[fl:], " \t") == "" {
+					fenceChar = 0
+					fenceLen = 0
+				}
+			}
+		} else if !indented {
+			if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+				fc := trimmed[0]
+				fl := len(trimmed) - len(strings.TrimLeft(trimmed, string(fc)))
+				fenceChar = fc
+				fenceLen = fl
+			} else if heading := extractHeadingLine(line); heading != "" {
+				currentHeading = heading
+			}
+		}
+
+		index := strings.Index(strings.ToLower(line), needle)
+		if index < 0 {
+			continue
+		}
+
+		beforeStart := max(0, i-contextLines)
+		afterEnd := min(len(lines), i+contextLines+1)
+		match := searchMatch{
+			Line:    i + 1,
+			Column:  index + 1,
+			Text:    line,
+			Before:  append([]string(nil), lines[beforeStart:i]...),
+			After:   append([]string(nil), lines[i+1:afterEnd]...),
+			Heading: currentHeading,
+			Anchor: searchAnchor{
+				Kind:  "heading",
+				Value: currentHeading,
+			},
+		}
+		matches = append(matches, match)
+		if len(matches) >= limit {
+			break
+		}
+	}
+
+	return matches
+}
+
+func extractHeadingLine(line string) string {
+	if leadingColumns(line) >= 4 {
+		return ""
+	}
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "#") {
+		return ""
+	}
+	hashes := len(trimmed) - len(strings.TrimLeft(trimmed, "#"))
+	if hashes == 0 || hashes > 6 {
+		return ""
+	}
+	after := trimmed[hashes:]
+	if len(after) == 0 || (after[0] != ' ' && after[0] != '\t') {
+		return ""
+	}
+	title := strings.TrimSpace(after)
+	// Strip optional closing # sequence (CommonMark §4.2).
+	if len(title) > 0 && title[len(title)-1] == '#' {
+		i := len(title)
+		for i > 0 && title[i-1] == '#' {
+			i--
+		}
+		if i == 0 || (title[i-1] == ' ' || title[i-1] == '\t') {
+			if i == 0 {
+				title = ""
+			} else {
+				title = strings.TrimRight(title[:i], " \t")
+			}
+		}
+	}
+	return title
+}
+
+func handleFileRaw(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		group, err := resolveGroupFromPath(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		id := r.PathValue("id")
+		if id == "" {
+			http.Error(w, "missing file id", http.StatusBadRequest)
+			return
+		}
+
+		entry := state.FindFile(id, group)
+		if entry == nil {
+			http.Error(w, "file not found", http.StatusNotFound)
+			return
+		}
+
+		if entry.Uploaded {
+			http.Error(w, "raw assets not available for uploaded files", http.StatusNotFound)
+			return
+		}
+
+		relPath := r.PathValue("path")
+		absPath := filepath.Join(filepath.Dir(entry.Path), relPath)
+		absPath = filepath.Clean(absPath)
+
+		// No boundary check: mo serves local files to the user's own browser
+		// (like handleOpenFile); http.ServeFile already rejects "..".
+		http.ServeFile(w, r, absPath)
+	}
+}
+
+func handleOpenFile(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		groupName, err := resolveGroupFromPath(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		var req openFileRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		entry := state.FindFile(req.FileID, groupName)
+		if entry == nil {
+			http.Error(w, "source file not found in group", http.StatusNotFound)
+			return
+		}
+
+		if entry.Uploaded {
+			http.Error(w, "relative links not available for uploaded files", http.StatusBadRequest)
+			return
+		}
+
+		decodedPath, err := url.PathUnescape(req.Path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		absPath := filepath.Join(filepath.Dir(entry.Path), decodedPath)
+		absPath = filepath.Clean(absPath)
+
+		if _, err := os.Stat(absPath); err != nil {
+			if os.IsNotExist(err) {
+				http.Error(w, fmt.Sprintf("file not found: %s", absPath), http.StatusNotFound)
+			} else {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			}
+			return
+		}
+
+		newEntry, err := state.AddFile(absPath, groupName)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(newEntry); err != nil {
+			slog.Error("failed to encode response", "error", err)
+		}
+	}
+}
+
+func handleAddPattern(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req patternRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		group, err := ResolveGroupName(req.Group)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		entries, err := state.AddPattern(req.Pattern, group)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(AddPatternResponse{Matched: len(entries), Files: entries}); err != nil {
+			slog.Error("failed to encode response", "error", err)
+		}
+	}
+}
+
+func handleRemovePattern(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req patternRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		group, err := ResolveGroupName(req.Group)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if !state.RemovePattern(req.Pattern, group) {
+			http.Error(w, "pattern not found", http.StatusNotFound)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func handleRestart(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		restoreFile, err := state.ExportState()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusAccepted)
+
+		// Send restart signal after response is written
+		select {
+		case state.restartCh <- restoreFile:
+		default:
+			os.Remove(restoreFile) //nolint:errcheck
+		}
+	}
+}
+
+func handleShutdown(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		select {
+		case state.shutdownCh <- struct{}{}:
+		default:
+		}
+	}
+}
+
+type statusGroup struct {
+	Group
+	Patterns []string `json:"patterns,omitempty"`
+}
+
+func handleStatus(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		groups := state.Groups()
+		statusGroups := make([]statusGroup, len(groups))
+		for i, g := range groups {
+			statusGroups[i] = statusGroup{
+				Group:    g,
+				Patterns: state.PatternsForGroup(g.Name),
+			}
+		}
+
+		resp := struct {
+			Version  string        `json:"version"`
+			Revision string        `json:"revision"`
+			PID      int           `json:"pid"`
+			Groups   []statusGroup `json:"groups"`
+		}{
+			Version:  version.Version,
+			Revision: version.Revision,
+			PID:      os.Getpid(),
+			Groups:   statusGroups,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			slog.Error("failed to encode status response", "error", err)
+		}
+	}
+}
+
+func handleVersion() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"version":  version.Version,
+			"revision": version.Revision,
+		}); err != nil {
+			slog.Error("failed to encode version response", "error", err)
+		}
+	}
+}
+
+func handleSSE(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		ch := state.Subscribe()
+		defer state.Unsubscribe(ch)
+
+		// Send server identity on connection
+		fmt.Fprintf(w, "event: started\ndata: {\"pid\":%d}\n\n", os.Getpid())
+		flusher.Flush()
+
+		ctx := r.Context()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case e, ok := <-ch:
+				if !ok {
+					return
+				}
+				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.Name, e.Data)
+				flusher.Flush()
+			}
+		}
+	}
+}
+
+func handleSPA() http.HandlerFunc {
+	distFS, err := fs.Sub(static.Frontend, "dist")
+	if err != nil {
+		slog.Error("failed to create sub filesystem", "error", err)
+		os.Exit(1)
+	}
+	fileServer := http.FileServer(http.FS(distFS))
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Try to serve the exact file first
+		path := r.URL.Path
+		if path == "/" {
+			path = "/index.html"
+		}
+
+		f, err := distFS.Open(strings.TrimPrefix(path, "/"))
+		if err == nil {
+			f.Close()
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+
+		// SPA fallback: serve index.html for all non-file routes
+		r.URL.Path = "/"
+		fileServer.ServeHTTP(w, r)
+	}
+}

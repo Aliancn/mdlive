@@ -1,0 +1,16 @@
+analyzers:
+  disable:
+    - mixedcaps
+    - funcfmt
+    # handleGroups explicitly checks `g.Files == nil` so it can
+    # normalize a nil slice to an empty literal and avoid emitting
+    # `"files": null` over the wire. nilslices flags exactly that
+    # nil-vs-empty distinction, which is what makes the
+    # normalization possible — disable the analyzer rather than
+    # paper over the encoding fix with a `len() == 0` branch that
+    # would also rewrite already-empty non-nil slices on every
+    # request.
+    - nilslices
+analyzers-settings:
+  errorstrings:
+    exclude-test: true
