@@ -47,7 +47,7 @@ func (r *Rules) Equal(other Rules) bool {
 // line is reported as an error so that a typo in a hand-written rule fails
 // loudly.
 func (r *Rules) Filter() (*Filter, error) {
-	f := &Filter{base: filepath.Clean(r.Base), include: r.IncludeHidden}
+	f := &Filter{base: filepath.ToSlash(filepath.Clean(r.Base)), include: r.IncludeHidden}
 	for _, line := range r.Excludes {
 		parsed, ok, err := parseLine(line)
 		if err != nil {
