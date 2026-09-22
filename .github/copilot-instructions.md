@@ -1,4 +1,5 @@
-# Copilot Instructions for ml (Markdown Opener)
+
+This file provides guidance to GitHub Copilot when working with code in this repository.
 
 ## What is ml
 
@@ -6,7 +7,7 @@
 
 ## Build & Run
 
-Requires Go and [pnpm](https://pnpm.io/). Node.js version is managed via `pnpm.executionEnv.nodeVersion` in `internal/frontend/package.json`.
+Requires Go 1.26+ and [pnpm](https://pnpm.io/). Node.js version is managed via `pnpm.executionEnv.nodeVersion` in `internal/frontend/package.json`.
 
 ```bash
 # Full build (frontend + Go binary, with ldflags)
@@ -36,8 +37,20 @@ go test ./internal/server/ -run TestHandleFiles
 # Run linters (oxlint for frontend, golangci-lint + gostyle for Go)
 make lint
 
+# Format frontend code (oxfmt)
+make fmt
+
+# Check frontend formatting without modifying
+make fmt-check
+
+# Take screenshots for README (requires Chrome)
+make screenshot
+
 # CI target (install dev deps + generate + test)
 make ci
+
+# Frontend dev server with backend proxy (proxies /_/ to localhost:6275)
+cd internal/frontend && pnpm run dev
 ```
 
 ### CLI Flags
@@ -48,7 +61,10 @@ make ci
 - `--no-open` — Never open browser
 - `--watch` / `-w` — Boolean flag that turns on watch mode; directory and glob positional arguments are registered as watch patterns
 - `--unwatch` — Boolean flag that removes watched patterns; directory and glob positional arguments specify which patterns to unwatch (with `-R`, a directory removes all patterns under it)
-- `--recursive` / `-R` — Recurse into subdirectories when a directory is given as an argument
+- `--recursive` / `-R` — Recurse into subdirectories when a directory is given as an argument (expands `*.md` → `**/*.md`)
+- `--exclude` — Repeatable glob pattern of files to exclude from discovery (gitignore-style, anchored at cwd)
+- `--include-hidden` — Include dot-prefixed hidden files/directories (default: hidden files are excluded)
+- `--ignore-file` — Name of the ignore file read from cwd (default: `.mlignore`, `''` disables)
 - `--close` — Close files instead of opening them
 - `--clear` — Clear saved session for the specified port
 - `--status` — Show status of all running ml servers
@@ -62,53 +78,63 @@ make ci
 
 **Go backend + embedded React SPA**, single binary.
 
-- `cmd/root.go` — CLI entry point (Cobra). Handles single-instance detection: if a server is already running on the port, adds files via HTTP API instead of starting a new one.
+- `cmd/root.go` — CLI entry point (Cobra). Handles single-instance detection: if a server is already running on the port, adds files via HTTP API instead of starting a new server. Supports directory arguments: directories are expanded to `*.md` files (or converted to watch patterns with `--watch`). Supports stdin pipe input.
+- `cmd/stdin.go` — Stdin pipe detection (`os.Stdin.Stat()` with `ModeCharDevice`), content reading, deterministic name generation (`stdin-<hash>.md`), and upload to running server.
 - `internal/server/server.go` — HTTP server, state management (mutex-guarded), SSE for live-reload, file watcher (fsnotify). All API routes use `/_/` prefix to avoid collision with SPA route paths (group names).
 - `internal/static/static.go` — `go:generate` runs the frontend build, then `go:embed` embeds the output from `internal/static/dist/`.
 - `internal/frontend/` — Vite + React 19 + TypeScript + Tailwind CSS v4 SPA. Build output goes to `internal/static/dist/` (configured in `vite.config.ts`).
+- `internal/backup/` — State persistence for open files/groups using atomic JSON writes to `$XDG_STATE_HOME/ml/backup/`. Enables session restoration across server restarts.
+- `internal/ignore/` — File-discovery filters: `--exclude` values, `.mlignore` lines, and the default hidden-path rule. Gitignore-style syntax anchored at cwd; two orthogonal layers (user rules with last-match-wins, hidden rule with literal-dot-segment escape).
+- `internal/logfile/` — Rotating JSON logging to `$XDG_STATE_HOME/ml/log/` (max 10MB, 3 backups, 7-day retention).
+- `internal/xdg/` — XDG Base Directory helper. `StateHome()` returns `$XDG_STATE_HOME` or default `~/.local/state`.
 - `version/version.go` — Version info, updated by tagpr on release. Build embeds revision via ldflags.
 - `testdata/` — Sample Markdown files (GFM, mermaid, math, alerts, etc.) and fixture projects for tests and dev. Reuse these for new test cases.
 
-## API Conventions
-
-All internal API endpoints are under `/_/api/` and SSE under `/_/events`. The `/_/` prefix is intentional to avoid collisions with user-facing group name routes (e.g., `/mygroup`).
-
-Key endpoints:
-- `GET /_/api/groups` — List all groups with files
-- `POST /_/api/files` — Add file
-- `DELETE /_/api/files/{id}` — Remove file
-- `GET /_/api/files/{id}/content` — File content (markdown)
-- `PUT /_/api/files/{id}/group` — Move file to another group
-- `PUT /_/api/reorder` — Reorder files in a group (group name in body)
-- `POST /_/api/files/open` — Open relative file link
-- `POST /_/api/patterns` — Add glob watch pattern
-- `DELETE /_/api/patterns` — Remove glob watch pattern
-- `GET /_/api/status` — Server status (version, pid, groups with patterns)
-- `GET /_/events` — SSE (event types: `update`, `file-changed`, `restart`)
-
 ## Frontend
 
-- Located in `internal/frontend/`, uses **pnpm** as the package manager.
-- React 19, TypeScript, Tailwind CSS v4.
-- Markdown rendering: `react-markdown` + `remark-gfm` + `rehype-raw` + `rehype-slug` (heading IDs) + `rehype-sanitize` + `@shikijs/rehype` (syntax highlighting) + `mermaid` (diagram rendering) + `remark-math` + `rehype-katex` (math/LaTeX) + `rehype-github-alerts` (GitHub-style alerts) + `react-zoom-pan-pinch` (image zoom).
-- SPA routing via `window.location.pathname` (no router library).
-- Key components: `App.tsx` (routing/state), `Sidebar.tsx` (file list with flat/tree view, resizable, drag-and-drop reorder), `TreeView.tsx` (tree view with collapsible directories), `MarkdownViewer.tsx` (rendering + raw view toggle), `TocPanel.tsx` (table of contents, resizable), `GroupDropdown.tsx` (group switcher), `FileContextMenu.tsx` (shared kebab menu for file operations), `WidthToggle.tsx` (wide/narrow content width toggle).
-- Custom hooks: `useSSE.ts` (SSE subscription with auto-reconnect), `useApi.ts` (typed API fetch wrappers), `useActiveHeading.ts` (scroll-based active heading tracking via IntersectionObserver).
+- Package manager: **pnpm** (version specified in `internal/frontend/package.json` `packageManager` field)
+- Markdown rendering: `react-markdown` + `remark-gfm` + `rehype-raw` + `rehype-slug` (heading IDs) + `rehype-sanitize` + `@shikijs/rehype` (syntax highlighting) + `mermaid` (diagram rendering) + `remark-math` + `rehype-katex` (math/LaTeX) + `rehype-github-alerts` (GitHub-style alerts) + `react-zoom-pan-pinch` (image zoom)
+- SPA routing via `window.location.pathname` (no router library)
+- Key components: `App.tsx` (routing/state), `Sidebar.tsx` (file list with flat/tree view, resizable, drag-and-drop reorder), `TreeView.tsx` (tree view with collapsible directories), `MarkdownViewer.tsx` (rendering + raw view toggle), `TocPanel.tsx` (table of contents, resizable), `GroupDropdown.tsx` (group switcher), `FileContextMenu.tsx` (shared kebab menu for file operations), `WidthToggle.tsx` (wide/narrow content width toggle)
+- Custom hooks: `useSSE.ts` (SSE subscription with auto-reconnect), `useApi.ts` (typed API fetch wrappers), `useActiveHeading.ts` (scroll-based active heading tracking via IntersectionObserver)
+- Utilities: `buildTree.ts` (converts flat file list to hierarchical tree with common prefix removal and single-child directory collapsing)
 - Theme: GitHub-style light/dark via CSS custom properties (`--color-gh-*`) in `styles/app.css`, toggled by `data-theme` attribute on `<html>`. UI components use Tailwind classes like `bg-gh-bg-sidebar`, `text-gh-text-secondary`, etc.
 - Toggle button pattern: `RawToggle.tsx` and `TocToggle.tsx` follow the same style (`bg-transparent border border-gh-border rounded-md p-1.5 text-gh-text-secondary`). Header buttons (`ViewModeToggle`, `ThemeToggle`, `WidthToggle`, sidebar toggle) use `text-gh-header-text` instead. New buttons should match the appropriate variant.
 
-## Key Patterns
+## Key Design Patterns
 
-- **Single instance design**: CLI probes `/_/api/status` on the target port via `probeServer()`. If already running, pushes files via `POST /_/api/files` and exits.
-- **File IDs**: Files get deterministic string IDs derived from the SHA-256 hash of the absolute path (first 8 hex characters). IDs are stable across server restarts, enabling deep linking. The frontend primarily references files by ID. Absolute paths are available via `FileEntry.path` for display.
-- **Tab groups**: Files are organized into named groups (default: "default"). Group name maps to the URL path.
+- **Single instance**: CLI probes `/_/api/status` on the target port via `probeServer()`. If already running, pushes files via `POST /_/api/groups/{group}/files` and exits.
+- **File IDs**: Files get deterministic string IDs derived from the SHA-256 hash of the absolute path (first 8 hex characters). IDs are stable across server restarts, enabling deep linking. The frontend primarily references files by ID. Absolute paths are available via `FileEntry.path` for display (e.g., tooltip, tree view).
+- **Tab groups**: Files are organized into named groups. Group name maps to the URL path (e.g., `/design`). Default group name is `"default"`.
 - **Live-reload via SSE**: fsnotify watches files; `file-changed` events trigger frontend to re-fetch content by file ID.
-- **State persistence**: Server state (files, groups, patterns) is backed up to `$XDG_STATE_HOME/ml/backup/ml-<port>.json` via `internal/backup`. When starting a new server, backup is always restored and merged with CLI-specified files/patterns (restored entries first, CLI entries appended, duplicates skipped). The backup file is only deleted when the CLI is invoked with `--clear`.
-- **Glob pattern watching**: `--watch` enables watch mode; positional arguments that are globs or directories are registered as patterns, expanded to matching files, and monitored for new files via fsnotify directory watches. Patterns are stored with reference-counted directory watches (`watchedDirs map[string]int`). `--unwatch` is a boolean flag; positional arguments (globs or directories) determine which patterns to remove. With `-R`, a directory argument removes all registered patterns under that directory prefix. Groups persist as long as they have files or patterns.
+- **Sidebar view modes**: Flat (default, with drag-and-drop reorder via dnd-kit) and tree (hierarchical directory view). View mode is persisted per-group in localStorage. Collapsed directory state is managed inside `TreeView` and also persisted per-group.
 - **Resizable panels**: Both `Sidebar.tsx` (left) and `TocPanel.tsx` (right) use the same drag-to-resize pattern with localStorage persistence. Left sidebar uses `e.clientX`, right panel uses `window.innerWidth - e.clientX`.
 - **Toolbar buttons in content area**: The toolbar column (ToC + Raw toggles) lives inside `MarkdownViewer.tsx`, positioned with `shrink-0 flex flex-col gap-2 -mr-4 -mt-4` to align with the header.
-- **Sidebar view modes**: Flat (default, with drag-and-drop reorder via dnd-kit) and tree (hierarchical directory view). View mode is persisted per-group in localStorage. Collapsed directory state is managed inside `TreeView` and also persisted per-group.
+- **State persistence**: Server state (files, groups, patterns) is backed up to `$XDG_STATE_HOME/ml/backup/ml-<port>.json` via `internal/backup`. On `--restart`, the server reloads this state to preserve the session. When starting a new server, backup is always restored and merged with CLI-specified files/patterns (restored entries first, CLI entries appended, duplicates skipped; on pattern conflicts the CLI invocation's rules win). Discovery rules persist per pattern in `RestoreData.PatternFilters`; backups without that field (older versions) restore patterns with zero rules, which keeps the default hidden-path behavior. The backup file is preserved across clean `--shutdown` and is only removed via the `--clear` path in the CLI.
+- **Positional arguments**: `resolveArgs(args, watchMode, recursive)` classifies each positional arg as a glob (via `hasGlobChars`), directory, or file. With `--watch`, globs and directories become watch patterns (`dir/*.md` or `dir/**/*.md` when `-R`). Without `--watch`, they are expanded once via `doublestar.Glob` / `filepath.Glob` and treated as files. Plain files are added directly. `--watch` alone without a glob/dir positional errors out (with a shell-expansion hint if only files were given).
+- **Stdin pipe**: When no file arguments are given and stdin is a pipe (not a terminal), content is read from stdin and treated as an uploaded file. Name is `stdin-<first 7 hex of SHA-256>.md` (deterministic, consistent with upload dedup). If a server is already running, content is POSTed to the upload API; otherwise it is passed as `UploadedFileData` to the new server. Combining stdin with file arguments or `--watch` returns an error. Max stdin size is 10MB (same as server upload limit).
+- **Glob pattern watching**: `--watch` turns on watch mode; directory and glob positional arguments are registered as patterns, then expanded to matching files and monitored for new files via fsnotify directory watches. Patterns are stored with reference-counted directory watches (`watchedDirs map[string]int`). `--unwatch` is a boolean flag that uses positional arguments (globs or directories) to determine which patterns to remove; with `-R`, a directory argument removes all registered patterns under that directory prefix. Ref counts are decremented accordingly. Groups persist as long as they have files or patterns.
+- **Discovery filters**: Each watch pattern carries its own `ignore.Rules` (raw lines + cwd anchor + `includeHidden`), sent in the `POST /_/api/patterns` body as an optional `filter` field. At registration the rules are compiled once into `GlobPattern.pattern` (`*ignore.Pattern`) and reused for the pattern's whole lifetime: initial expansion, directory-watch setup/teardown (`watchDirsForPattern`/`RemovePattern` — same pruning judgment, so refcounts stay symmetric), `matchAndAddFile` for create events, and `handleCreateForGlobs` (which prunes created directories no covering pattern admits). The hidden rule operates on path components relative to the *pattern base* (the pattern base itself is exempt, so `.git/**/*.md` works), while user rules are anchored at the filter's `Base` (the CLI's cwd). Explicit file arguments and uploaded files bypass filtering entirely; excludes never remove existing sidebar entries. Re-registering a `(pattern, group)` with different rules releases the old watches first and re-expands; identical rules are a no-op.
 - **localStorage conventions**: All keys use `ml-` prefix (e.g., `ml-sidebar-width`, `ml-sidebar-viewmode`, `ml-sidebar-tree-collapsed`, `ml-theme`). Read patterns use `try/catch` around `JSON.parse` with fallback defaults.
+
+## API Conventions
+
+All internal endpoints use `/_/api/` prefix and SSE uses `/_/events`. The `/_/` prefix avoids collisions with user-facing group name routes. File-scoped endpoints are nested under `/_/api/groups/{group}/` so the group context is always explicit in the URL path.
+
+Key endpoints:
+- `GET /_/api/groups` — List all groups with files
+- `POST /_/api/groups/{group}/files` — Add file
+- `DELETE /_/api/groups/{group}/files/{id}` — Remove file
+- `GET /_/api/groups/{group}/files/{id}/content` — File content (markdown)
+- `PUT /_/api/groups/{group}/files/{id}/group` — Move file to another group (target group in body)
+- `PUT /_/api/groups/{group}/reorder` — Reorder files in a group
+- `POST /_/api/groups/{group}/files/open` — Open relative file link
+- `POST /_/api/groups/{group}/files/upload` — Upload file (drag-and-drop)
+- `GET /_/api/groups/{group}/files/{id}/raw/{path...}` — Raw file assets (images, etc.)
+- `POST /_/api/patterns` — Add glob watch pattern (optional `filter` field with discovery rules; response includes `excluded` count)
+- `DELETE /_/api/patterns` — Remove glob watch pattern
+- `GET /_/api/status` — Server status (version, pid, groups with patterns)
+- `GET /_/events` — SSE (event types: `update`, `file-changed`, `restart`)
 
 ## CI/CD
 
@@ -116,3 +142,13 @@ Key endpoints:
 - **Release**: tagpr for automated tagging, goreleaser for cross-platform builds. The `go generate` step (frontend build) runs in goreleaser's `before.hooks`.
 - **License check**: Trivy scans for license issues
 - CI requires pnpm setup (`pnpm/action-setup`) before any Go build step because `go generate` triggers the frontend build.
+
+## Development Workflow
+
+- **Branching**: small fixes may be committed directly to `main`; non-trivial changes go through a feature branch + PR. Dependabot PRs (weekly, grouped by ecosystem) are merged once their checks pass.
+- **Commits**: Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`). tagpr derives the next version and CHANGELOG entries from these — `feat:` bumps minor, `fix:` bumps patch, everything else keeps the version. When Claude Code creates commits, end the message with `Co-Authored-By: Claude Code <noreply@anthropic.com>`.
+- **Before pushing**: run `go test ./...` and `make lint` (golangci-lint + gostyle must be installed: golangci-lint v2 via Homebrew, gostyle via `go install github.com/k1LoW/gostyle@latest`; `~/go/bin` must be on PATH for gostyle). Frontend changes also need `cd internal/frontend && pnpm test`.
+- **CI gates on PRs**: three-platform test matrix (Ubuntu/macOS/Windows), reviewdog golangci-lint, gostyle, octocov coverage comment, and Trivy license check (fails on UNKNOWN/MEDIUM/HIGH licenses — keep dependencies permissively licensed).
+- **Go style**: exported symbols need doc comments ending in a period (`revive`/`godot`); prefer pointer receivers when in doubt (gostyle `recvtype`); constructors first, exported methods before unexported ones (`funcorder`). Frontend is linted with oxlint and formatted with oxfmt.
+- **Release flow**: tagpr keeps a standing "Release for vX.Y.Z" PR against `main` (configured in `.tagpr`: version file is `version/version.go`, draft releases). Every push to `main` updates that PR; merging it creates the tag, which runs goreleaser to build and publish binaries. Versioning starts at `0.1.0` for this project (independent of the upstream mo history).
+- **GitHub Actions note**: PRs created with `GITHUB_TOKEN` (e.g. by tagpr) do not trigger workflows automatically — their runs show as `action_required` and must be approved manually in the Actions tab. The repo setting "Allow GitHub Actions to create and approve pull requests" must stay enabled for tagpr to work.

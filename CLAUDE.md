@@ -143,3 +143,13 @@ Key endpoints:
 - **Release**: tagpr for automated tagging, goreleaser for cross-platform builds. The `go generate` step (frontend build) runs in goreleaser's `before.hooks`.
 - **License check**: Trivy scans for license issues
 - CI requires pnpm setup (`pnpm/action-setup`) before any Go build step because `go generate` triggers the frontend build.
+
+## Development Workflow
+
+- **Branching**: small fixes may be committed directly to `main`; non-trivial changes go through a feature branch + PR. Dependabot PRs (weekly, grouped by ecosystem) are merged once their checks pass.
+- **Commits**: Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`). tagpr derives the next version and CHANGELOG entries from these — `feat:` bumps minor, `fix:` bumps patch, everything else keeps the version. When Claude Code creates commits, end the message with `Co-Authored-By: Claude Code <noreply@anthropic.com>`.
+- **Before pushing**: run `go test ./...` and `make lint` (golangci-lint + gostyle must be installed: golangci-lint v2 via Homebrew, gostyle via `go install github.com/k1LoW/gostyle@latest`; `~/go/bin` must be on PATH for gostyle). Frontend changes also need `cd internal/frontend && pnpm test`.
+- **CI gates on PRs**: three-platform test matrix (Ubuntu/macOS/Windows), reviewdog golangci-lint, gostyle, octocov coverage comment, and Trivy license check (fails on UNKNOWN/MEDIUM/HIGH licenses — keep dependencies permissively licensed).
+- **Go style**: exported symbols need doc comments ending in a period (`revive`/`godot`); prefer pointer receivers when in doubt (gostyle `recvtype`); constructors first, exported methods before unexported ones (`funcorder`). Frontend is linted with oxlint and formatted with oxfmt.
+- **Release flow**: tagpr keeps a standing "Release for vX.Y.Z" PR against `main` (configured in `.tagpr`: version file is `version/version.go`, draft releases). Every push to `main` updates that PR; merging it creates the tag, which runs goreleaser to build and publish binaries. Versioning starts at `0.1.0` for this project (independent of the upstream mo history).
+- **GitHub Actions note**: PRs created with `GITHUB_TOKEN` (e.g. by tagpr) do not trigger workflows automatically — their runs show as `action_required` and must be approved manually in the Actions tab. The repo setting "Allow GitHub Actions to create and approve pull requests" must stay enabled for tagpr to work.
