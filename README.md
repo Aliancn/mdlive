@@ -46,7 +46,7 @@ $ curl -sfL https://raw.githubusercontent.com/Aliancn/mdlive/main/install.sh | s
 
 **Manually:**
 
-Download binary from [releases page](https://github.com/Aliancn/mdlive/releases)
+Download a binary or package from [releases page](https://github.com/Aliancn/mdlive/releases): archives (`ml` / `ml.exe`) for macOS, Linux, and Windows; `deb`/`rpm`/`apk` packages for Linux distributions.
 
 ## Usage
 
@@ -262,7 +262,7 @@ $ ml --status --json
     "url": "http://localhost:6275",
     "status": "running",
     "pid": 12345,
-    "version": "0.15.0",
+    "version": "0.1.0",
     "revision": "abc1234",
     "groups": [
       {
@@ -303,6 +303,7 @@ $ ml --status --json
 | `--clear` | | | Clear saved session (restarts server if running) |
 | `--foreground` | | | Run ml server in foreground |
 | `--json` | | | Output structured data as JSON to stdout |
+| `--version` | | | Show version |
 | `--dangerously-allow-remote-access` | | | Allow remote access without authentication (trusted networks only) |
 
 > [!WARNING]
@@ -310,7 +311,7 @@ $ ml --status --json
 
 ## Build
 
-Requires Go and [pnpm](https://pnpm.io/).
+Requires Go 1.26+ and [pnpm](https://pnpm.io/).
 
 ``` console
 $ make build
