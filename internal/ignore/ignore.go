@@ -34,19 +34,19 @@ type Rules struct {
 
 // Empty reports whether the rules carry no user configuration, in which case
 // only the default hidden-path rule applies.
-func (r Rules) Empty() bool {
+func (r *Rules) Empty() bool {
 	return len(r.Excludes) == 0 && !r.IncludeHidden
 }
 
 // Equal reports whether the two rule sets are identical.
-func (r Rules) Equal(other Rules) bool {
+func (r *Rules) Equal(other Rules) bool {
 	return r.Base == other.Base && r.IncludeHidden == other.IncludeHidden && slices.Equal(r.Excludes, other.Excludes)
 }
 
 // Filter parses the rule lines and returns an immutable filter. A malformed
 // line is reported as an error so that a typo in a hand-written rule fails
 // loudly.
-func (r Rules) Filter() (*Filter, error) {
+func (r *Rules) Filter() (*Filter, error) {
 	f := &Filter{base: filepath.Clean(r.Base), include: r.IncludeHidden}
 	for _, line := range r.Excludes {
 		parsed, ok, err := parseLine(line)
@@ -227,7 +227,7 @@ type rule struct {
 	negate   bool   // started with '!'
 }
 
-func (r rule) matches(absSlash, relSlash string, isDir bool) bool {
+func (r *rule) matches(absSlash, relSlash string, isDir bool) bool {
 	if r.dirOnly && !isDir {
 		return false
 	}

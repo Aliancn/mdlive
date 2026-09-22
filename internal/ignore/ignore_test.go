@@ -95,7 +95,8 @@ func TestValidateLine(t *testing.T) {
 // filterFor builds a Filter whose anchored patterns resolve against base.
 func filterFor(t *testing.T, base string, lines []string, includeHidden bool) *Filter {
 	t.Helper()
-	f, err := Rules{Base: base, Excludes: lines, IncludeHidden: includeHidden}.Filter()
+	rules := Rules{Base: base, Excludes: lines, IncludeHidden: includeHidden}
+	f, err := rules.Filter()
 	if err != nil {
 		t.Fatalf("Rules.Filter() unexpected error: %v", err)
 	}
