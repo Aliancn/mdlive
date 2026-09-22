@@ -790,7 +790,7 @@ func fetchRegisteredPatterns(addr, groupName string) ([]string, error) {
 // values, so that the flags win under last-match-wins. The returned filter is
 // never nil: even with no rules it enforces the default hidden-path rule.
 func resolveFilter(cwd string) (*ignore.Filter, error) {
-	rules := ignore.Rules{Base: cwd}
+	rules := ignore.Rules{Base: filepath.ToSlash(cwd)}
 	if ignoreFile != "" {
 		lines, err := ignore.ReadLines(filepath.Join(cwd, ignoreFile))
 		if err != nil {

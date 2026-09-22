@@ -1407,8 +1407,8 @@ func TestResolveFilter(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveFilter returned error: %v", err)
 		}
-		if f.Rules().Base != cwd {
-			t.Fatalf("rules base = %q, want %q", f.Rules().Base, cwd)
+		if f.Rules().Base != filepath.ToSlash(cwd) {
+			t.Fatalf("rules base = %q, want %q", f.Rules().Base, filepath.ToSlash(cwd))
 		}
 		if len(f.Rules().Excludes) != 0 {
 			t.Fatalf("rules excludes = %v, want empty", f.Rules().Excludes)
