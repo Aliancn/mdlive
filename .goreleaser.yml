@@ -74,7 +74,7 @@ nfpms:
     ids:
       - ml-linux
     homepage: https://github.com/Aliancn/mdlive
-    maintainer: Ken'ichiro Oyama <k1lowxb@gmail.com>
+    maintainer: Aliancn
     description: "ml is a Markdown viewer that opens .md files in a browser"
     license: MIT
     formats:
