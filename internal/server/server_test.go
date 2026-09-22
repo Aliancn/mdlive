@@ -2707,7 +2707,7 @@ func TestWalkSymlinkTree_ReportsUnresolvedEntries(t *testing.T) {
 	}
 
 	var dirs, files []string
-	unresolved, err := walkSymlinkTree(dir, func(p string) {
+	stats, err := walkSymlinkTree(dir, func(p string) {
 		dirs = append(dirs, p)
 	}, func(p string) {
 		files = append(files, p)
@@ -2715,8 +2715,8 @@ func TestWalkSymlinkTree_ReportsUnresolvedEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walkSymlinkTree returned error: %v", err)
 	}
-	if !slices.Contains(unresolved, dangling) {
-		t.Errorf("unresolved = %q, want it to contain %q", unresolved, dangling)
+	if !slices.Contains(stats.Unresolved, dangling) {
+		t.Errorf("stats.Unresolved = %q, want it to contain %q", stats.Unresolved, dangling)
 	}
 	if slices.Contains(dirs, dangling) || slices.Contains(files, dangling) {
 		t.Errorf("dangling symlink must not be visited: dirs=%q files=%q", dirs, files)
@@ -3056,14 +3056,14 @@ func TestAddPatternWithRules(t *testing.T) {
 
 	t.Run("default rules hide dot paths", func(t *testing.T) {
 		s := newTestState(t)
-		entries, excluded, err := s.AddPatternWithRules(pattern, DefaultGroup, ignore.Rules{Base: dir})
+		entries, stats, err := s.AddPatternWithRules(pattern, DefaultGroup, ignore.Rules{Base: dir})
 		if err != nil {
 			t.Fatalf("AddPatternWithRules returned error: %v", err)
 		}
-		if excluded != 1 {
+		if stats.Excluded != 1 {
 			// .hidden.md is dropped at file level; .git is pruned before its
 			// contents ever become matches.
-			t.Fatalf("got excluded=%d, want 1", excluded)
+			t.Fatalf("got excluded=%d, want 1", stats.Excluded)
 		}
 		paths := groupFilePaths(s, DefaultGroup)
 		for _, want := range []string{
@@ -3091,7 +3091,7 @@ func TestAddPatternWithRules(t *testing.T) {
 	t.Run("user excludes filter matches", func(t *testing.T) {
 		s := newTestState(t)
 		rules := ignore.Rules{Base: dir, Excludes: []string{"vendor/**"}}
-		_, excluded, err := s.AddPatternWithRules(pattern, DefaultGroup, rules)
+		_, stats, err := s.AddPatternWithRules(pattern, DefaultGroup, rules)
 		if err != nil {
 			t.Fatalf("AddPatternWithRules returned error: %v", err)
 		}
@@ -3102,10 +3102,10 @@ func TestAddPatternWithRules(t *testing.T) {
 		if !slices.Contains(paths, filepath.Join(dir, "a.md")) {
 			t.Errorf("plain file a.md missing: %v", paths)
 		}
-		if excluded != 1 {
+		if stats.Excluded != 1 {
 			// vendor/ is pruned by its own rule; only .hidden.md reaches the
 			// filter as a match.
-			t.Fatalf("got excluded=%d, want 1", excluded)
+			t.Fatalf("got excluded=%d, want 1", stats.Excluded)
 		}
 	})
 
@@ -3229,7 +3229,7 @@ func TestWalkSymlinkTree_Prune(t *testing.T) {
 	}
 
 	var dirs, files []string
-	unresolved, err := walkSymlinkTree(dir, func(p string) {
+	stats, err := walkSymlinkTree(dir, func(p string) {
 		dirs = append(dirs, p)
 	}, func(p string) {
 		files = append(files, p)
@@ -3237,8 +3237,8 @@ func TestWalkSymlinkTree_Prune(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walkSymlinkTree returned error: %v", err)
 	}
-	if len(unresolved) != 0 {
-		t.Fatalf("unresolved = %v, want empty", unresolved)
+	if len(stats.Unresolved) != 0 {
+		t.Fatalf("unresolved = %v, want empty", stats.Unresolved)
 	}
 	if slices.Contains(dirs, filepath.Join(dir, ".git")) {
 		t.Errorf("pruned directory .git was visited")

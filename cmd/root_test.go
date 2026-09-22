@@ -1569,7 +1569,7 @@ func TestPostPatterns_SendsFilter(t *testing.T) {
 			t.Errorf("failed to decode body: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(server.AddPatternResponse{Matched: 0}) //nolint:errcheck
+		json.NewEncoder(w).Encode(server.AddPatternResponse{PatternStats: server.PatternStats{Matched: 0}}) //nolint:errcheck
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
