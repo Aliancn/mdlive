@@ -24,6 +24,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/fswatcher/fswatcher"
 	"github.com/k1LoW/donegroup"
+	"github.com/Aliancn/mdlive/internal/ignore"
 	"github.com/Aliancn/mdlive/internal/static"
 	"github.com/Aliancn/mdlive/version"
 	"golang.org/x/text/collate"
@@ -208,11 +209,26 @@ type GlobPattern struct {
 	PatternSlash string // Pre-converted to forward slashes for doublestar matching
 	BaseDir      string // Base directory extracted via SplitPattern
 	Group        string // Target group for matched files
+
+	rules   ignore.Rules    // discovery rules this pattern was registered with
+	pattern *ignore.Pattern // compiled per-pattern filter, built at registration
 }
 
 // IsRecursive returns true if the pattern contains ** for recursive matching.
 func (gp *GlobPattern) IsRecursive() bool {
 	return strings.Contains(gp.Pattern, "**")
+}
+
+// pruneFunc returns a walk prune callback that rejects directories the
+// pattern's filter does not admit. The result is immutable once the pattern is
+// registered, so it needs no locking.
+func (gp *GlobPattern) pruneFunc() func(string) bool {
+	if gp.pattern == nil {
+		return nil
+	}
+	return func(dir string) bool {
+		return !gp.pattern.AdmitsDir(dir)
+	}
 }
 
 type State struct {
@@ -681,10 +697,28 @@ func (s *State) ShutdownCh() <-chan struct{} {
 	return s.shutdownCh
 }
 
-// AddPattern registers a glob pattern for automatic file discovery.
-// It performs an initial expansion to add existing matches and starts
-// watching the base directory for new files.
+// AddPattern registers a glob pattern for automatic file discovery with no
+// discovery filter.
 func (s *State) AddPattern(absPattern, groupName string) ([]*FileEntry, error) {
+	entries, _, err := s.AddPatternWithRules(absPattern, groupName, ignore.Rules{})
+	return entries, err
+}
+
+// AddPatternWithRules registers a glob pattern for automatic file discovery,
+// with the given rules filtering both the initial expansion and every later
+// match, and pruning directory watches the rules exclude. It performs an
+// initial expansion to add existing matches and starts watching the base
+// directory for new files. The second return value counts matches the filter
+// dropped, so callers can tell "nothing matched" from "everything was
+// excluded". Re-registering a pattern with different rules replaces the old
+// rules and re-expands; the old directory watches are released first so
+// refcounts stay symmetric.
+func (s *State) AddPatternWithRules(absPattern, groupName string, rules ignore.Rules) ([]*FileEntry, int, error) {
+	filter, err := rules.Filter()
+	if err != nil {
+		return nil, 0, fmt.Errorf("invalid filter: %w", err)
+	}
+
 	// Use forward slashes for doublestar
 	dsPattern := filepath.ToSlash(absPattern)
 	base, relPat := doublestar.SplitPattern(dsPattern)
@@ -692,18 +726,27 @@ func (s *State) AddPattern(absPattern, groupName string) ([]*FileEntry, error) {
 
 	info, err := os.Stat(base)
 	if err != nil {
-		return nil, fmt.Errorf("base directory %q does not exist: %w", base, err)
+		return nil, 0, fmt.Errorf("base directory %q does not exist: %w", base, err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("base path %q is not a directory", base)
+		return nil, 0, fmt.Errorf("base path %q is not a directory", base)
 	}
 
+	var replaced *GlobPattern
 	gp, createdGroup, added := func() (*GlobPattern, bool, bool) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		for _, p := range s.patterns {
+		for i, p := range s.patterns {
 			if p.Pattern == absPattern && p.Group == groupName {
-				return nil, false, false
+				if p.rules.Equal(rules) {
+					return nil, false, false
+				}
+				// Re-registration with different rules: the caller releases
+				// the old watches below and the new expansion re-adds only
+				// what the new rules admit.
+				replaced = p
+				s.patterns = append(s.patterns[:i], s.patterns[i+1:]...)
+				break
 			}
 		}
 		gp := &GlobPattern{
@@ -711,6 +754,8 @@ func (s *State) AddPattern(absPattern, groupName string) ([]*FileEntry, error) {
 			PatternSlash: dsPattern,
 			BaseDir:      base,
 			Group:        groupName,
+			rules:        rules,
+			pattern:      filter.ForPattern(dsPattern, filepath.ToSlash(base)),
 		}
 		s.patterns = append(s.patterns, gp)
 		// Ensure the group exists even if no files match yet.
@@ -722,7 +767,10 @@ func (s *State) AddPattern(absPattern, groupName string) ([]*FileEntry, error) {
 		return gp, createdGroup, true
 	}()
 	if !added {
-		return nil, nil
+		return nil, 0, nil
+	}
+	if replaced != nil {
+		s.walkDirsForPattern(replaced, s.removeDirWatch)
 	}
 
 	// Initial expansion
@@ -749,7 +797,7 @@ func (s *State) AddPattern(absPattern, groupName string) ([]*FileEntry, error) {
 					matches = append(matches, rel)
 				}
 			}
-		})
+		}, gp.pruneFunc())
 		if err == nil {
 			err = matchErr
 		}
@@ -758,13 +806,25 @@ func (s *State) AddPattern(absPattern, groupName string) ([]*FileEntry, error) {
 	}
 	if err != nil {
 		s.rollbackPattern(gp, createdGroup)
-		return nil, fmt.Errorf("glob expansion failed: %w", err)
+		if replaced != nil {
+			// The old pattern lost its watches above; restore it intact.
+			s.mu.Lock()
+			s.patterns = append(s.patterns, replaced)
+			s.mu.Unlock()
+			s.watchDirsForPattern(replaced)
+		}
+		return nil, 0, fmt.Errorf("glob expansion failed: %w", err)
 	}
 	collate.New(language.Und, collate.Numeric).SortStrings(matches)
 
 	var entries []*FileEntry
+	excluded := 0
 	for _, m := range matches {
 		abs := filepath.Join(base, m)
+		if !gp.pattern.AdmitsFile(abs) {
+			excluded++
+			continue
+		}
 		entry, err := s.AddFile(abs, groupName)
 		if err != nil {
 			slog.Warn("skipping file", "path", abs, "error", err)
@@ -775,7 +835,7 @@ func (s *State) AddPattern(absPattern, groupName string) ([]*FileEntry, error) {
 
 	s.watchDirsForPattern(gp)
 
-	return entries, nil
+	return entries, excluded, nil
 }
 
 // Patterns returns a copy of all registered glob patterns.
@@ -796,6 +856,21 @@ func (s *State) PatternsForGroup(groupName string) []string {
 		if p.Group == groupName {
 			result = append(result, p.Pattern)
 		}
+	}
+	return result
+}
+
+// PatternFiltersForGroup returns the non-empty discovery filters registered
+// for a specific group.
+func (s *State) PatternFiltersForGroup(groupName string) []PatternFilterData {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var result []PatternFilterData
+	for _, p := range s.patterns {
+		if p.Group != groupName || p.rules.Empty() {
+			continue
+		}
+		result = append(result, PatternFilterData{Pattern: p.Pattern, Rules: p.rules})
 	}
 	return result
 }
@@ -840,11 +915,20 @@ type UploadedFileData struct {
 	Group   string `json:"group"`
 }
 
+// PatternFilterData pairs a watch pattern with the discovery rules it was
+// registered with, for status output and persistence.
+type PatternFilterData struct {
+	Pattern string       `json:"pattern"`
+	Group   string       `json:"group,omitempty"`
+	Rules   ignore.Rules `json:"rules"`
+}
+
 // RestoreData represents the state to be persisted across restarts.
 type RestoreData struct {
-	Groups        map[string][]string `json:"groups"`
-	Patterns      map[string][]string `json:"patterns,omitempty"`
-	UploadedFiles []UploadedFileData  `json:"uploadedFiles,omitempty"`
+	Groups         map[string][]string `json:"groups"`
+	Patterns       map[string][]string `json:"patterns,omitempty"`
+	PatternFilters []PatternFilterData `json:"patternFilters,omitempty"`
+	UploadedFiles  []UploadedFileData  `json:"uploadedFiles,omitempty"`
 }
 
 // WriteRestoreFile writes RestoreData to a temporary file and returns the path.
@@ -909,6 +993,13 @@ func (s *State) snapshotRestoreData() RestoreData {
 		data.Patterns = make(map[string][]string)
 		for _, p := range s.patterns {
 			data.Patterns[p.Group] = append(data.Patterns[p.Group], p.Pattern)
+			if !p.rules.Empty() {
+				data.PatternFilters = append(data.PatternFilters, PatternFilterData{
+					Pattern: p.Pattern,
+					Group:   p.Group,
+					Rules:   p.rules,
+				})
+			}
 		}
 	}
 
@@ -983,7 +1074,7 @@ func (s *State) walkDirsForPattern(gp *GlobPattern, fn func(string)) {
 		return
 	}
 
-	unresolved, err := walkSymlinkTree(gp.BaseDir, fn, nil)
+	unresolved, err := walkSymlinkTree(gp.BaseDir, fn, nil, gp.pruneFunc())
 	// Entries that could not be classified never reached fn, so hand over the
 	// ones already tracked as watched directories. Without this, unwatch cannot
 	// decrement the refcount of a directory that stopped resolving after its
@@ -1456,19 +1547,28 @@ func (s *State) handleCreateForGlobs(path string) {
 	if info.IsDir() {
 		watchCount := 0
 		for _, gp := range patterns {
-			if gp.IsRecursive() && pathWithinBase(path, gp.BaseDir) {
+			if gp.IsRecursive() && pathWithinBase(path, gp.BaseDir) && gp.pattern.AdmitsDir(path) {
 				watchCount++
 			}
 		}
 		if watchCount == 0 {
 			return
 		}
+		// Prune subtrees no covering pattern admits, so a created .git or
+		// vendor directory is neither scanned nor watched.
 		if _, err := walkSymlinkTree(path, func(dir string) {
 			for range watchCount {
 				s.addDirWatch(dir)
 			}
 		}, func(file string) {
 			s.matchAndAddFile(file, patterns)
+		}, func(dir string) bool {
+			for _, gp := range patterns {
+				if gp.IsRecursive() && pathWithinBase(dir, gp.BaseDir) && gp.pattern.AdmitsDir(dir) {
+					return false
+				}
+			}
+			return true
 		}); err != nil {
 			slog.Warn("failed to scan created directory", "path", path, "error", err)
 		}
@@ -1487,8 +1587,11 @@ func pathWithinBase(path, base string) bool {
 // every directory to visitDir and every other entry to visitFile. Paths that
 // could not be classified are returned separately instead of being dropped,
 // because a caller keeping per-directory state still has to reach a directory
-// that vanished between watch setup and teardown.
-func walkSymlinkTree(root string, visitDir, visitFile func(string)) ([]string, error) {
+// that vanished between watch setup and teardown. When prune is non-nil it is
+// called with each directory (never the root itself) before descending, and a
+// true result skips the subtree entirely: pruned directories reach neither
+// visitDir, visitFile, nor the unresolved list.
+func walkSymlinkTree(root string, visitDir, visitFile func(string), prune func(string) bool) ([]string, error) {
 	var unresolved []string
 	var walk func(string, map[string]struct{}) error
 	walk = func(path string, ancestors map[string]struct{}) error {
@@ -1501,6 +1604,9 @@ func walkSymlinkTree(root string, visitDir, visitFile func(string)) ([]string, e
 			if visitFile != nil {
 				visitFile(path)
 			}
+			return nil
+		}
+		if prune != nil && path != root && prune(path) {
 			return nil
 		}
 
@@ -1547,7 +1653,7 @@ func (s *State) matchAndAddFile(path string, patterns []*GlobPattern) {
 		if err != nil {
 			continue
 		}
-		if matched {
+		if matched && gp.pattern.AdmitsFile(path) {
 			if _, err := s.AddFile(path, gp.Group); err != nil {
 				slog.Warn("skipping file", "path", path, "error", err)
 				return
@@ -1580,10 +1686,18 @@ type patternRequest struct {
 	Group   string `json:"group"`
 }
 
+// addPatternRequest carries the pattern plus its optional discovery filter.
+// Older clients omit Filter, which means no rules.
+type addPatternRequest struct {
+	patternRequest
+	Filter *ignore.Rules `json:"filter,omitempty"`
+}
+
 // AddPatternResponse is the JSON response for the add-pattern endpoint.
 type AddPatternResponse struct {
-	Matched int          `json:"matched"`
-	Files   []*FileEntry `json:"files,omitempty"`
+	Matched  int          `json:"matched"`
+	Excluded int          `json:"excluded,omitempty"`
+	Files    []*FileEntry `json:"files,omitempty"`
 }
 
 type fileContentResponse struct {
@@ -2201,7 +2315,7 @@ func handleOpenFile(state *State) http.HandlerFunc {
 
 func handleAddPattern(state *State) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req patternRequest
+		var req addPatternRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -2213,14 +2327,23 @@ func handleAddPattern(state *State) http.HandlerFunc {
 			return
 		}
 
-		entries, err := state.AddPattern(req.Pattern, group)
+		rules := ignore.Rules{}
+		if req.Filter != nil {
+			rules = *req.Filter
+			if rules.Base == "" && len(rules.Excludes) > 0 {
+				http.Error(w, "filter.base is required when filter.excludes is set", http.StatusBadRequest)
+				return
+			}
+		}
+
+		entries, excluded, err := state.AddPatternWithRules(req.Pattern, group, rules)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(AddPatternResponse{Matched: len(entries), Files: entries}); err != nil {
+		if err := json.NewEncoder(w).Encode(AddPatternResponse{Matched: len(entries), Excluded: excluded, Files: entries}); err != nil {
 			slog.Error("failed to encode response", "error", err)
 		}
 	}
@@ -2280,7 +2403,8 @@ func handleShutdown(state *State) http.HandlerFunc {
 
 type statusGroup struct {
 	Group
-	Patterns []string `json:"patterns,omitempty"`
+	Patterns       []string            `json:"patterns,omitempty"`
+	PatternFilters []PatternFilterData `json:"patternFilters,omitempty"`
 }
 
 func handleStatus(state *State) http.HandlerFunc {
@@ -2289,8 +2413,9 @@ func handleStatus(state *State) http.HandlerFunc {
 		statusGroups := make([]statusGroup, len(groups))
 		for i, g := range groups {
 			statusGroups[i] = statusGroup{
-				Group:    g,
-				Patterns: state.PatternsForGroup(g.Name),
+				Group:          g,
+				Patterns:       state.PatternsForGroup(g.Name),
+				PatternFilters: state.PatternFiltersForGroup(g.Name),
 			}
 		}
 

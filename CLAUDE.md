@@ -63,6 +63,9 @@ cd internal/frontend && pnpm run dev
 - `--watch` / `-w` — Boolean flag that turns on watch mode; directory and glob positional arguments are registered as watch patterns
 - `--unwatch` — Boolean flag that removes watched patterns; directory and glob positional arguments specify which patterns to unwatch (with `-R`, a directory removes all patterns under it)
 - `--recursive` / `-R` — Recurse into subdirectories when a directory is given as an argument (expands `*.md` → `**/*.md`)
+- `--exclude` — Repeatable glob pattern of files to exclude from discovery (gitignore-style, anchored at cwd)
+- `--include-hidden` — Include dot-prefixed hidden files/directories (default: hidden files are excluded)
+- `--ignore-file` — Name of the ignore file read from cwd (default: `.mlignore`, `''` disables)
 - `--close` — Close files instead of opening them
 - `--clear` — Clear saved session for the specified port
 - `--status` — Show status of all running ml servers
@@ -82,6 +85,7 @@ cd internal/frontend && pnpm run dev
 - `internal/static/static.go` — `go:generate` runs the frontend build, then `go:embed` embeds the output from `internal/static/dist/`.
 - `internal/frontend/` — Vite + React 19 + TypeScript + Tailwind CSS v4 SPA. Build output goes to `internal/static/dist/` (configured in `vite.config.ts`).
 - `internal/backup/` — State persistence for open files/groups using atomic JSON writes to `$XDG_STATE_HOME/ml/backup/`. Enables session restoration across server restarts.
+- `internal/ignore/` — File-discovery filters: `--exclude` values, `.mlignore` lines, and the default hidden-path rule. Gitignore-style syntax anchored at cwd; two orthogonal layers (user rules with last-match-wins, hidden rule with literal-dot-segment escape).
 - `internal/logfile/` — Rotating JSON logging to `$XDG_STATE_HOME/ml/log/` (max 10MB, 3 backups, 7-day retention).
 - `internal/xdg/` — XDG Base Directory helper. `StateHome()` returns `$XDG_STATE_HOME` or default `~/.local/state`.
 - `version/version.go` — Version info, updated by tagpr on release. Build embeds revision via ldflags.
@@ -107,10 +111,11 @@ cd internal/frontend && pnpm run dev
 - **Sidebar view modes**: Flat (default, with drag-and-drop reorder via dnd-kit) and tree (hierarchical directory view). View mode is persisted per-group in localStorage. Collapsed directory state is managed inside `TreeView` and also persisted per-group.
 - **Resizable panels**: Both `Sidebar.tsx` (left) and `TocPanel.tsx` (right) use the same drag-to-resize pattern with localStorage persistence. Left sidebar uses `e.clientX`, right panel uses `window.innerWidth - e.clientX`.
 - **Toolbar buttons in content area**: The toolbar column (ToC + Raw toggles) lives inside `MarkdownViewer.tsx`, positioned with `shrink-0 flex flex-col gap-2 -mr-4 -mt-4` to align with the header.
-- **State persistence**: Server state (files, groups, patterns) is backed up to `$XDG_STATE_HOME/ml/backup/ml-<port>.json` via `internal/backup`. On `--restart`, the server reloads this state to preserve the session. When starting a new server, backup is always restored and merged with CLI-specified files/patterns (restored entries first, CLI entries appended, duplicates skipped). The backup file is preserved across clean `--shutdown` and is only removed via the `--clear` path in the CLI.
+- **State persistence**: Server state (files, groups, patterns) is backed up to `$XDG_STATE_HOME/ml/backup/ml-<port>.json` via `internal/backup`. On `--restart`, the server reloads this state to preserve the session. When starting a new server, backup is always restored and merged with CLI-specified files/patterns (restored entries first, CLI entries appended, duplicates skipped; on pattern conflicts the CLI invocation's rules win). Discovery rules persist per pattern in `RestoreData.PatternFilters`; backups without that field (older versions) restore patterns with zero rules, which keeps the default hidden-path behavior. The backup file is preserved across clean `--shutdown` and is only removed via the `--clear` path in the CLI.
 - **Positional arguments**: `resolveArgs(args, watchMode, recursive)` classifies each positional arg as a glob (via `hasGlobChars`), directory, or file. With `--watch`, globs and directories become watch patterns (`dir/*.md` or `dir/**/*.md` when `-R`). Without `--watch`, they are expanded once via `doublestar.Glob` / `filepath.Glob` and treated as files. Plain files are added directly. `--watch` alone without a glob/dir positional errors out (with a shell-expansion hint if only files were given).
 - **Stdin pipe**: When no file arguments are given and stdin is a pipe (not a terminal), content is read from stdin and treated as an uploaded file. Name is `stdin-<first 7 hex of SHA-256>.md` (deterministic, consistent with upload dedup). If a server is already running, content is POSTed to the upload API; otherwise it is passed as `UploadedFileData` to the new server. Combining stdin with file arguments or `--watch` returns an error. Max stdin size is 10MB (same as server upload limit).
 - **Glob pattern watching**: `--watch` turns on watch mode; directory and glob positional arguments are registered as patterns, then expanded to matching files and monitored for new files via fsnotify directory watches. Patterns are stored with reference-counted directory watches (`watchedDirs map[string]int`). `--unwatch` is a boolean flag that uses positional arguments (globs or directories) to determine which patterns to remove; with `-R`, a directory argument removes all registered patterns under that directory prefix. Ref counts are decremented accordingly. Groups persist as long as they have files or patterns.
+- **Discovery filters**: Each watch pattern carries its own `ignore.Rules` (raw lines + cwd anchor + `includeHidden`), sent in the `POST /_/api/patterns` body as an optional `filter` field. At registration the rules are compiled once into `GlobPattern.pattern` (`*ignore.Pattern`) and reused for the pattern's whole lifetime: initial expansion, directory-watch setup/teardown (`watchDirsForPattern`/`RemovePattern` — same pruning judgment, so refcounts stay symmetric), `matchAndAddFile` for create events, and `handleCreateForGlobs` (which prunes created directories no covering pattern admits). The hidden rule operates on path components relative to the *pattern base* (the pattern base itself is exempt, so `.git/**/*.md` works), while user rules are anchored at the filter's `Base` (the CLI's cwd). Explicit file arguments and uploaded files bypass filtering entirely; excludes never remove existing sidebar entries. Re-registering a `(pattern, group)` with different rules releases the old watches first and re-expands; identical rules are a no-op.
 - **localStorage conventions**: All keys use `ml-` prefix (e.g., `ml-sidebar-width`, `ml-sidebar-viewmode`, `ml-sidebar-tree-collapsed`, `ml-theme`). Read patterns use `try/catch` around `JSON.parse` with fallback defaults.
 
 ## API Conventions
@@ -127,7 +132,7 @@ Key endpoints:
 - `POST /_/api/groups/{group}/files/open` — Open relative file link
 - `POST /_/api/groups/{group}/files/upload` — Upload file (drag-and-drop)
 - `GET /_/api/groups/{group}/files/{id}/raw/{path...}` — Raw file assets (images, etc.)
-- `POST /_/api/patterns` — Add glob watch pattern
+- `POST /_/api/patterns` — Add glob watch pattern (optional `filter` field with discovery rules; response includes `excluded` count)
 - `DELETE /_/api/patterns` — Remove glob watch pattern
 - `GET /_/api/status` — Server status (version, pid, groups with patterns)
 - `GET /_/events` — SSE (event types: `update`, `file-changed`, `restart`)

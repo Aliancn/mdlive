@@ -27,6 +27,7 @@ import (
 
 	"github.com/k1LoW/donegroup"
 	"github.com/Aliancn/mdlive/internal/backup"
+	"github.com/Aliancn/mdlive/internal/ignore"
 	"github.com/Aliancn/mdlive/internal/logfile"
 	"github.com/Aliancn/mdlive/internal/server"
 	"github.com/Aliancn/mdlive/version"
@@ -73,7 +74,16 @@ var (
 	clearBackup                  bool
 	jsonOutput                   bool
 	dangerouslyAllowRemoteAccess bool
+	excludes                     []string
+	includeHidden                bool
+	ignoreFile                   string
 )
+
+// patternSpec pairs a watch pattern with the discovery rules it carries.
+type patternSpec struct {
+	Pattern string
+	Rules   ignore.Rules
+}
 
 var rootCmd = &cobra.Command{
 	Use:   "ml [flags] [FILE|DIR ...]",
@@ -172,6 +182,26 @@ Watch mode and glob patterns:
 
   $ ml -R docs/                       Open every .md under docs/ once
 
+Excluding files:
+  By default, dot-prefixed files and directories (e.g. .git/) are not
+  opened or watched. --include-hidden turns that off. --exclude values
+  (repeatable) and the .mlignore file in the working directory filter
+  what directory and glob arguments discover; they use gitignore-style
+  syntax with rules anchored at the working directory.
+
+  $ ml -R . --exclude 'vendor/**'     Skip everything under vendor/
+  $ ml -w '**/*.md' --exclude '**/node_modules/**'
+  $ ml .git/README.md                 Explicit file arguments are never filtered
+  $ ml -w '**/*.md' --include-hidden  Watch hidden files too
+
+  A pattern without a separator (vendor) matches the base name at any
+  depth; a pattern with a separator (vendor/**, /docs/drafts/**) is
+  anchored at the working directory. '!'-prefixed lines re-include
+  files, and the last matching line wins. Files already shown in the
+  sidebar are never removed by excludes. Registered rules are shown by
+  --status and updated by re-running ml with the new flags (or via
+  ml --clear).
+
 WARNING: --bind with a non-loopback address:
   Binding to a non-localhost address (e.g. 0.0.0.0) exposes ml to the
   network without any authentication. Remote clients can read any file
@@ -209,6 +239,9 @@ func init() {
 	rootCmd.Flags().BoolVar(&clearBackup, "clear", false, "Clear saved session for the specified port")
 	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output structured data as JSON to stdout")
 	rootCmd.Flags().BoolVar(&dangerouslyAllowRemoteAccess, "dangerously-allow-remote-access", false, "Allow remote access without authentication. Recommended only for trusted networks.")
+	rootCmd.Flags().StringArrayVar(&excludes, "exclude", nil, "Glob pattern of files to exclude from discovery (repeatable)")
+	rootCmd.Flags().BoolVar(&includeHidden, "include-hidden", false, "Include dot-prefixed hidden files and directories in discovery")
+	rootCmd.Flags().StringVar(&ignoreFile, "ignore-file", ".mlignore", "Name of the ignore file read from the working directory ('' disables)")
 }
 
 func run(cmd *cobra.Command, args []string) (retErr error) {
@@ -344,11 +377,11 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	if restore != "" {
-		filesByGroup, patternsByGroup, uploadedFiles, err := loadRestoreData(restore)
+		filesByGroup, patternsByGroup, patternFilters, uploadedFiles, err := loadRestoreData(restore)
 		if err != nil {
 			return fmt.Errorf("failed to restore state: %w", err)
 		}
-		return startServer(cmd.Context(), addr, filesByGroup, patternsByGroup, uploadedFiles)
+		return startServer(cmd.Context(), addr, filesByGroup, restorePatternSpecs(patternsByGroup, patternFilters), uploadedFiles)
 	}
 
 	resolved, err := server.ResolveGroupName(target)
@@ -361,12 +394,21 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 		return fmt.Errorf("--recursive (-R) requires a directory argument")
 	}
 
-	files, patterns, err := resolveArgs(args, watchMode, recursive)
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("cannot get working directory: %w", err)
+	}
+	filter, err := resolveFilter(cwd)
 	if err != nil {
 		return err
 	}
 
-	if watchMode && len(patterns) == 0 {
+	files, patternSpecs, err := resolveArgs(args, watchMode, recursive, filter)
+	if err != nil {
+		return err
+	}
+
+	if watchMode && len(patternSpecs) == 0 {
 		if len(files) > 0 {
 			return fmt.Errorf("--watch (-w) requires a glob pattern or directory argument\n(hint: the shell may have expanded the glob pattern; quote it, e.g. -w '**/*.md')")
 		}
@@ -395,7 +437,7 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 
 	// When no files, patterns, or stdin are specified and a server is already
 	// running, just open the browser and exit.
-	if len(files) == 0 && len(patterns) == 0 && stdinData == nil {
+	if len(files) == 0 && len(patternSpecs) == 0 && stdinData == nil {
 		if _, err := probeServer(addr, probeTimeoutDefault); err == nil {
 			openBrowser(addr)
 			return nil
@@ -403,7 +445,7 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	// Try adding to an existing server.
-	if stdinData != nil || len(files) > 0 || len(patterns) > 0 {
+	if stdinData != nil || len(files) > 0 || len(patternSpecs) > 0 {
 		result, probeErr := probeServer(addr, probeTimeoutFast)
 		if probeErr == nil {
 			isNewGroup := !slices.Contains(result.groups, target)
@@ -411,7 +453,7 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 			var deeplinks []deeplinkEntry
 			fileEntries := postFiles(result.client, addr, target, files)
 			deeplinks = append(deeplinks, fileEntries...)
-			patternEntries, patternsAdded := postPatterns(result.client, addr, target, patterns)
+			patternEntries, patternsAdded := postPatterns(result.client, addr, target, patternSpecs)
 			deeplinks = append(deeplinks, patternEntries...)
 
 			var stdinUploadErr error
@@ -425,7 +467,7 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 				}
 			}
 
-			if stdinData != nil && len(files) == 0 && len(patterns) == 0 && stdinUploadErr != nil {
+			if stdinData != nil && len(files) == 0 && len(patternSpecs) == 0 && stdinUploadErr != nil {
 				return stdinUploadErr
 			}
 
@@ -436,7 +478,7 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 			if stdinData != nil && stdinUploadErr == nil {
 				added++
 			}
-			slog.Info("added to existing server", "files", len(files), "patterns", len(patterns), "stdin", stdinData != nil, "addr", addr)
+			slog.Info("added to existing server", "files", len(files), "patterns", len(patternSpecs), "stdin", stdinData != nil, "addr", addr)
 			emitServeOutput(addr, deeplinks, false)
 			fmt.Fprintf(os.Stderr, "ml: added %d item(s) to http://%s\n", added, addr)
 
@@ -448,23 +490,21 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	filesByGroup := map[string][]string{target: files}
-	var patternsByGroup map[string][]string
-	if len(patterns) > 0 {
-		patternsByGroup = map[string][]string{target: patterns}
-	}
+	specsByGroup := map[string][]patternSpec{target: patternSpecs}
 
 	// Restore backup and merge with specified files/patterns
 	var rd server.RestoreData
 	if err := backup.Load(port, &rd); err != nil {
 		slog.Warn("failed to load backup", "error", err)
 	}
-	restoredFiles, restoredPatterns, restoredUploads := filterValidRestoreData(&rd)
+	restoredFiles, restoredPatterns, restoredFilters, restoredUploads := filterValidRestoreData(&rd)
+	restoredSpecs := restorePatternSpecs(restoredPatterns, restoredFilters)
 	var uploadedFiles []server.UploadedFileData
-	if len(restoredFiles) > 0 || len(restoredPatterns) > 0 || len(restoredUploads) > 0 {
+	if len(restoredFiles) > 0 || len(restoredSpecs) > 0 || len(restoredUploads) > 0 {
 		slog.Info("restoring session from backup", "port", port)
 		fmt.Fprintf(os.Stderr, "ml: restoring previous session for port %d\n", port)
 		filesByGroup = mergeGroups(restoredFiles, filesByGroup)
-		patternsByGroup = mergeGroups(restoredPatterns, patternsByGroup)
+		specsByGroup = mergePatternSpecGroups(restoredSpecs, specsByGroup)
 		uploadedFiles = restoredUploads
 	}
 
@@ -505,9 +545,9 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	if foreground {
-		return startServer(cmd.Context(), addr, filesByGroup, patternsByGroup, uploadedFiles)
+		return startServer(cmd.Context(), addr, filesByGroup, specsByGroup, uploadedFiles)
 	}
-	return startBackground(addr, filesByGroup, patternsByGroup, uploadedFiles)
+	return startBackground(addr, filesByGroup, specsByGroup, uploadedFiles)
 }
 
 // mergeGroups merges base and additional group maps, with base entries first.
@@ -536,7 +576,7 @@ func mergeGroups(base, additional map[string][]string) map[string][]string {
 }
 
 // filterValidRestoreData validates restore data by checking that file paths still exist.
-func filterValidRestoreData(rd *server.RestoreData) (map[string][]string, map[string][]string, []server.UploadedFileData) {
+func filterValidRestoreData(rd *server.RestoreData) (map[string][]string, map[string][]string, []server.PatternFilterData, []server.UploadedFileData) {
 	filesByGroup := make(map[string][]string)
 	for group, paths := range rd.Groups {
 		for _, p := range paths {
@@ -551,21 +591,95 @@ func filterValidRestoreData(rd *server.RestoreData) (map[string][]string, map[st
 	patternsByGroup := make(map[string][]string)
 	maps.Copy(patternsByGroup, rd.Patterns)
 
-	return filesByGroup, patternsByGroup, rd.UploadedFiles
+	return filesByGroup, patternsByGroup, rd.PatternFilters, rd.UploadedFiles
 }
 
-func loadRestoreData(path string) (map[string][]string, map[string][]string, []server.UploadedFileData, error) {
+// restorePatternSpecs builds pattern specs from restored patterns and their
+// persisted discovery filters. Patterns without a stored filter get zero
+// rules, which restores the default hidden-path behavior.
+func restorePatternSpecs(patternsByGroup map[string][]string, filters []server.PatternFilterData) map[string][]patternSpec {
+	if len(patternsByGroup) == 0 {
+		return nil
+	}
+	rulesByPattern := make(map[string]ignore.Rules, len(filters))
+	for _, f := range filters {
+		rulesByPattern[f.Pattern] = f.Rules
+	}
+	specs := make(map[string][]patternSpec, len(patternsByGroup))
+	for group, pats := range patternsByGroup {
+		for _, p := range pats {
+			specs[group] = append(specs[group], patternSpec{Pattern: p, Rules: rulesByPattern[p]})
+		}
+	}
+	return specs
+}
+
+// mergePatternSpecs merges base and additional specs, base entries first. A
+// pattern present in both keeps its base position but takes the additional
+// rules: the latest invocation wins on rule conflicts, matching how a running
+// server treats re-registration.
+func mergePatternSpecs(base, additional []patternSpec) []patternSpec {
+	if len(additional) == 0 {
+		return base
+	}
+	if len(base) == 0 {
+		return additional
+	}
+	cliRules := make(map[string]ignore.Rules, len(additional))
+	for _, s := range additional {
+		cliRules[s.Pattern] = s.Rules
+	}
+	merged := make([]patternSpec, 0, len(base)+len(additional))
+	seen := make(map[string]struct{}, len(base)+len(additional))
+	for _, s := range base {
+		if _, ok := seen[s.Pattern]; ok {
+			continue
+		}
+		if rules, ok := cliRules[s.Pattern]; ok {
+			s.Rules = rules
+		}
+		merged = append(merged, s)
+		seen[s.Pattern] = struct{}{}
+	}
+	for _, s := range additional {
+		if _, ok := seen[s.Pattern]; ok {
+			continue
+		}
+		merged = append(merged, s)
+		seen[s.Pattern] = struct{}{}
+	}
+	return merged
+}
+
+// mergePatternSpecGroups merges base and additional per-group spec maps, with
+// base entries first.
+func mergePatternSpecGroups(base, additional map[string][]patternSpec) map[string][]patternSpec {
+	if len(base) == 0 {
+		return additional
+	}
+	if len(additional) == 0 {
+		return base
+	}
+	merged := make(map[string][]patternSpec, len(base)+len(additional))
+	maps.Copy(merged, base)
+	for group, specs := range additional {
+		merged[group] = mergePatternSpecs(merged[group], specs)
+	}
+	return merged
+}
+
+func loadRestoreData(path string) (map[string][]string, map[string][]string, []server.PatternFilterData, []server.UploadedFileData, error) {
 	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	os.Remove(path)
 
 	var rd server.RestoreData
 	if err := json.Unmarshal(data, &rd); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return rd.Groups, rd.Patterns, rd.UploadedFiles, nil
+	return rd.Groups, rd.Patterns, rd.PatternFilters, rd.UploadedFiles, nil
 }
 
 func isLoopbackBind(bind string) bool {
@@ -671,7 +785,46 @@ func fetchRegisteredPatterns(addr, groupName string) ([]string, error) {
 	return nil, fmt.Errorf("group %q not found (use --status to see registered groups)", groupName)
 }
 
-func resolveArgs(args []string, watchMode, recursive bool) (files, patterns []string, err error) {
+// resolveFilter builds the discovery filter for this invocation: the lines of
+// the ignore file in the working directory come first, then the --exclude
+// values, so that the flags win under last-match-wins. The returned filter is
+// never nil: even with no rules it enforces the default hidden-path rule.
+func resolveFilter(cwd string) (*ignore.Filter, error) {
+	rules := ignore.Rules{Base: cwd}
+	if ignoreFile != "" {
+		lines, err := ignore.ReadLines(filepath.Join(cwd, ignoreFile))
+		if err != nil {
+			return nil, fmt.Errorf("cannot read %s: %w", ignoreFile, err)
+		}
+		for _, line := range lines {
+			if err := ignore.ValidateLine(line); err != nil {
+				fmt.Fprintf(os.Stderr, "ml: warning: ignoring invalid line in %s: %v\n", ignoreFile, err)
+				continue
+			}
+			rules.Excludes = append(rules.Excludes, line)
+		}
+	}
+	for _, value := range excludes {
+		if err := ignore.ValidateLine(value); err != nil {
+			return nil, fmt.Errorf("invalid --exclude value %q: %w", value, err)
+		}
+		rules.Excludes = append(rules.Excludes, value)
+	}
+	if includeHidden {
+		rules.IncludeHidden = true
+	}
+	f, err := rules.Filter()
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+func resolveArgs(args []string, watchMode, recursive bool, filter *ignore.Filter) (files []string, specs []patternSpec, err error) {
+	if filter == nil {
+		// A zero filter still enforces the default hidden-path rule.
+		filter = &ignore.Filter{}
+	}
 	for _, arg := range args {
 		abs, err := filepath.Abs(arg)
 		if err != nil {
@@ -680,14 +833,17 @@ func resolveArgs(args []string, watchMode, recursive bool) (files, patterns []st
 
 		if hasGlobChars(arg) {
 			if watchMode {
-				patterns = append(patterns, abs)
+				specs = append(specs, patternSpec{Pattern: abs, Rules: filter.Rules()})
 				continue
 			}
-			matches, err := expandGlobPattern(abs)
+			matches, excluded, err := expandGlobPattern(abs, filter)
 			if err != nil {
 				return nil, nil, err
 			}
 			if len(matches) == 0 {
+				if excluded > 0 {
+					return nil, nil, fmt.Errorf("no files matched %s (%d excluded by --exclude/%s)", arg, excluded, ignoreFile)
+				}
 				return nil, nil, fmt.Errorf("no files matched %s", arg)
 			}
 			files = append(files, matches...)
@@ -704,22 +860,26 @@ func resolveArgs(args []string, watchMode, recursive bool) (files, patterns []st
 		if stat.IsDir() {
 			pat := filepath.Join(abs, markdownGlobFor(recursive))
 			if watchMode {
-				patterns = append(patterns, pat)
+				specs = append(specs, patternSpec{Pattern: pat, Rules: filter.Rules()})
 				continue
 			}
-			matches, err := expandGlobPattern(pat)
+			matches, excluded, err := expandGlobPattern(pat, filter)
 			if err != nil {
 				return nil, nil, err
 			}
 			if len(matches) == 0 {
+				if excluded > 0 {
+					return nil, nil, fmt.Errorf("no .md files in %s (%d excluded by --exclude/%s)", abs, excluded, ignoreFile)
+				}
 				return nil, nil, fmt.Errorf("no .md files in %s", abs)
 			}
 			files = append(files, matches...)
 			continue
 		}
+		// Explicitly named files are never filtered.
 		files = append(files, abs)
 	}
-	return files, patterns, nil
+	return files, specs, nil
 }
 
 func markdownGlobFor(recursive bool) string {
@@ -729,18 +889,26 @@ func markdownGlobFor(recursive bool) string {
 	return markdownGlob
 }
 
-func expandGlobPattern(absPattern string) ([]string, error) {
+// expandGlobPattern expands one pattern and filters the matches through the
+// discovery filter. It returns how many matches were excluded so callers can
+// distinguish "nothing matched" from "everything was excluded".
+func expandGlobPattern(absPattern string, filter *ignore.Filter) (matches []string, excluded int, err error) {
 	base, rel := doublestar.SplitPattern(filepath.ToSlash(absPattern))
 	rels, err := doublestar.Glob(os.DirFS(base), rel, doublestar.WithFilesOnly())
 	if err != nil {
-		return nil, fmt.Errorf("failed to expand glob %s: %w", absPattern, err)
+		return nil, 0, fmt.Errorf("failed to expand glob %s: %w", absPattern, err)
 	}
-	matches := make([]string, len(rels))
-	for i, r := range rels {
-		matches[i] = filepath.Join(base, r)
+	pf := filter.ForPattern(filepath.ToSlash(absPattern), filepath.ToSlash(base))
+	for _, r := range rels {
+		abs := filepath.Join(base, r)
+		if !pf.AdmitsFile(abs) {
+			excluded++
+			continue
+		}
+		matches = append(matches, abs)
 	}
 	collate.New(language.Und, collate.Numeric).SortStrings(matches)
-	return matches, nil
+	return matches, excluded, nil
 }
 
 func postFiles(client *http.Client, addr, group string, files []string) []deeplinkEntry {
@@ -782,21 +950,22 @@ func postFiles(client *http.Client, addr, group string, files []string) []deepli
 	return entries
 }
 
-// postPatterns registers each pattern with the running server. It returns the
-// deeplink entries for every file matched by the successful registrations,
-// plus the number of patterns that were actually registered (which is not
-// derivable from len(entries) because a valid pattern may legitimately match
-// zero files).
-func postPatterns(client *http.Client, addr, group string, patterns []string) ([]deeplinkEntry, int) {
+// postPatterns registers each pattern with the running server, together with
+// its discovery rules. It returns the deeplink entries for every file matched
+// by the successful registrations, plus the number of patterns that were
+// actually registered (which is not derivable from len(entries) because a
+// valid pattern may legitimately match zero files).
+func postPatterns(client *http.Client, addr, group string, specs []patternSpec) ([]deeplinkEntry, int) {
 	var entries []deeplinkEntry
 	added := 0
-	for _, pat := range patterns {
-		body, err := json.Marshal(map[string]string{
-			"pattern": pat,
+	for _, spec := range specs {
+		body, err := json.Marshal(map[string]any{
+			"pattern": spec.Pattern,
 			"group":   group,
+			"filter":  spec.Rules,
 		})
 		if err != nil {
-			slog.Warn("failed to marshal request", "pattern", pat, "error", err)
+			slog.Warn("failed to marshal request", "pattern", spec.Pattern, "error", err)
 			continue
 		}
 		resp, err := client.Post(
@@ -805,11 +974,11 @@ func postPatterns(client *http.Client, addr, group string, patterns []string) ([
 			bytes.NewReader(body),
 		)
 		if err != nil {
-			slog.Warn("failed to post pattern", "pattern", pat, "error", err)
+			slog.Warn("failed to post pattern", "pattern", spec.Pattern, "error", err)
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			slog.Warn("failed to add pattern", "pattern", pat, "status", resp.StatusCode)
+			slog.Warn("failed to add pattern", "pattern", spec.Pattern, "status", resp.StatusCode)
 			resp.Body.Close()
 			continue
 		}
@@ -821,6 +990,9 @@ func postPatterns(client *http.Client, addr, group string, patterns []string) ([
 		}
 		resp.Body.Close()
 		added++
+		if len(patResp.Files) == 0 && patResp.Excluded > 0 {
+			fmt.Fprintf(os.Stderr, "ml: %s matched no files (%d excluded by --exclude/%s)\n", spec.Pattern, patResp.Excluded, ignoreFile)
+		}
 		for _, f := range patResp.Files {
 			entries = append(entries, deeplinkEntry{
 				URL:  buildDeeplink(addr, group, f.ID),
@@ -851,9 +1023,10 @@ type jsonServeOutput struct {
 }
 
 type jsonStatusGroupEntry struct {
-	Name     string   `json:"name"`
-	Files    int      `json:"files"`
-	Patterns []string `json:"patterns,omitempty"`
+	Name           string                      `json:"name"`
+	Files          int                         `json:"files"`
+	Patterns       []string                    `json:"patterns,omitempty"`
+	PatternFilters []server.PatternFilterData  `json:"patternFilters,omitempty"`
 }
 
 type jsonStatusEntry struct {
@@ -1187,19 +1360,23 @@ func doClose(addr string, paths []string, groupName string) ([]string, error) {
 	return closedPaths, joinedErr
 }
 
+// statusGroupEntry is one group entry in the /_/api/status response.
+type statusGroupEntry struct {
+	Name  string `json:"name"`
+	Files []struct {
+		Name string `json:"name"`
+		ID   string `json:"id"`
+		Path string `json:"path"`
+	} `json:"files"`
+	Patterns       []string                   `json:"patterns,omitempty"`
+	PatternFilters []server.PatternFilterData `json:"patternFilters,omitempty"`
+}
+
 type statusResponse struct {
-	Version  string `json:"version"`
-	Revision string `json:"revision"`
-	PID      int    `json:"pid"`
-	Groups   []struct {
-		Name  string `json:"name"`
-		Files []struct {
-			Name string `json:"name"`
-			ID   string `json:"id"`
-			Path string `json:"path"`
-		} `json:"files"`
-		Patterns []string `json:"patterns,omitempty"`
-	} `json:"groups"`
+	Version  string             `json:"version"`
+	Revision string             `json:"revision"`
+	PID      int                `json:"pid"`
+	Groups   []statusGroupEntry `json:"groups"`
 }
 
 func doStatus() error {
@@ -1254,9 +1431,10 @@ func doStatus() error {
 			}
 			for _, g := range status.Groups {
 				entry.Groups = append(entry.Groups, jsonStatusGroupEntry{
-					Name:     g.Name,
-					Files:    len(g.Files),
-					Patterns: g.Patterns,
+					Name:           g.Name,
+					Files:          len(g.Files),
+					Patterns:       g.Patterns,
+					PatternFilters: g.PatternFilters,
 				})
 			}
 			jsonEntries = append(jsonEntries, entry)
@@ -1270,6 +1448,19 @@ func doStatus() error {
 				fmt.Fprintf(os.Stdout, "  %s: %d file(s)\n", g.Name, len(g.Files))
 				if len(g.Patterns) > 0 {
 					fmt.Fprintf(os.Stdout, "    watching: %s\n", strings.Join(g.Patterns, ", "))
+				}
+				for _, pf := range g.PatternFilters {
+					if len(pf.Rules.Excludes) == 0 && !pf.Rules.IncludeHidden {
+						continue
+					}
+					detail := strings.Join(pf.Rules.Excludes, ", ")
+					if pf.Rules.IncludeHidden {
+						if detail != "" {
+							detail += ", "
+						}
+						detail += "(hidden files included)"
+					}
+					fmt.Fprintf(os.Stdout, "    excluding: %s\n", detail)
 				}
 			}
 			if i < len(ports)-1 {
@@ -1319,7 +1510,7 @@ func discoverPorts() []int {
 	return ports
 }
 
-func startServer(ctx context.Context, addr string, filesByGroup map[string][]string, patternsByGroup map[string][]string, uploadedFiles []server.UploadedFileData) error {
+func startServer(ctx context.Context, addr string, filesByGroup map[string][]string, specsByGroup map[string][]patternSpec, uploadedFiles []server.UploadedFileData) error {
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -1363,11 +1554,11 @@ func startServer(ctx context.Context, addr string, filesByGroup map[string][]str
 		}
 	}
 	var patternsAdded int
-	for group, pats := range patternsByGroup {
-		for _, pat := range pats {
-			entries, err := state.AddPattern(pat, group)
+	for group, specs := range specsByGroup {
+		for _, spec := range specs {
+			entries, _, err := state.AddPatternWithRules(spec.Pattern, group, spec.Rules)
 			if err != nil {
-				slog.Warn("failed to add pattern", "pattern", pat, "error", err)
+				slog.Warn("failed to add pattern", "pattern", spec.Pattern, "error", err)
 				continue
 			}
 			patternsAdded++
@@ -1469,8 +1660,27 @@ func spawnNewProcess(addr string, restoreFile string) (*os.Process, error) {
 	return cmd.Process, nil
 }
 
-func startBackground(addr string, filesByGroup map[string][]string, patternsByGroup map[string][]string, uploadedFiles []server.UploadedFileData) error {
-	restoreFile, err := server.WriteRestoreFile(server.RestoreData{Groups: filesByGroup, Patterns: patternsByGroup, UploadedFiles: uploadedFiles})
+func startBackground(addr string, filesByGroup map[string][]string, specsByGroup map[string][]patternSpec, uploadedFiles []server.UploadedFileData) error {
+	patternsByGroup := make(map[string][]string, len(specsByGroup))
+	var patternFilters []server.PatternFilterData
+	for group, specs := range specsByGroup {
+		for _, spec := range specs {
+			patternsByGroup[group] = append(patternsByGroup[group], spec.Pattern)
+			if !spec.Rules.Empty() {
+				patternFilters = append(patternFilters, server.PatternFilterData{
+					Pattern: spec.Pattern,
+					Group:   group,
+					Rules:   spec.Rules,
+				})
+			}
+		}
+	}
+	restoreFile, err := server.WriteRestoreFile(server.RestoreData{
+		Groups:         filesByGroup,
+		Patterns:       patternsByGroup,
+		PatternFilters: patternFilters,
+		UploadedFiles:  uploadedFiles,
+	})
 	if err != nil {
 		return err
 	}
@@ -1498,7 +1708,7 @@ func startBackground(addr string, filesByGroup map[string][]string, patternsByGr
 			// Lost a concurrent startup race: another ml server owns the
 			// port. Add our files to the winner instead of reporting a
 			// false success.
-			return addToRunningServer(addr, status, filesByGroup, patternsByGroup, uploadedFiles)
+			return addToRunningServer(addr, status, filesByGroup, specsByGroup, uploadedFiles)
 		}
 		return fmt.Errorf("%w (spawned pid %d)", err, pid)
 	}
@@ -1526,7 +1736,7 @@ func startBackground(addr string, filesByGroup map[string][]string, patternsByGr
 // addToRunningServer posts files, patterns, and uploaded files to a ml server
 // that is already running on addr. Used when a background start loses the
 // port to another ml instance (concurrent startup race).
-func addToRunningServer(addr string, status *statusResponse, filesByGroup map[string][]string, patternsByGroup map[string][]string, uploadedFiles []server.UploadedFileData) error {
+func addToRunningServer(addr string, status *statusResponse, filesByGroup map[string][]string, specsByGroup map[string][]patternSpec, uploadedFiles []server.UploadedFileData) error {
 	slog.Info("port already served by another ml instance; adding to it", "addr", addr, "pid", status.PID)
 	client := &http.Client{Timeout: probeTimeoutDefault}
 	var deeplinks []deeplinkEntry
@@ -1538,9 +1748,9 @@ func addToRunningServer(addr string, status *statusResponse, filesByGroup map[st
 		deeplinks = append(deeplinks, entries...)
 		added += len(entries)
 	}
-	for group, patterns := range patternsByGroup {
-		attempted += len(patterns)
-		entries, patternsAdded := postPatterns(client, addr, group, patterns)
+	for group, specs := range specsByGroup {
+		attempted += len(specs)
+		entries, patternsAdded := postPatterns(client, addr, group, specs)
 		deeplinks = append(deeplinks, entries...)
 		added += patternsAdded
 	}

@@ -139,6 +139,36 @@ $ ml --unwatch -R docs/                               # Removes docs/*.md, docs/
 
 Patterns are resolved to absolute paths before matching, so you can specify either a relative glob or the full path shown by `--status`.
 
+#### Excluding files
+
+By default, `ml` does not open or watch dot-prefixed files and directories (`.git/`, `.cache/`, `.hidden.md`, ...). Use `--include-hidden` to turn that off.
+
+`--exclude` (repeatable) and the `.mlignore` file in the working directory filter what directory and glob arguments discover. Both use gitignore-style syntax, with rules anchored at the working directory:
+
+| Pattern | Meaning |
+|---------|---------|
+| `vendor` | No separator: matches the base name at any depth |
+| `vendor/**` | Contains a separator: anchored at the working directory |
+| `/docs/drafts/**` | Leading `/` also anchors at the working directory |
+| `build/` | Trailing `/`: matches directories only |
+| `!keep.md` | `!` re-includes files; the last matching line wins |
+| `# comment` | Comment lines (and blank lines) are ignored |
+
+``` console
+$ ml -R . --exclude 'vendor/**'                  # Skip everything under vendor/
+$ ml -w '**/*.md' --exclude '**/node_modules/**' # Watch all .md except node_modules
+$ ml -R . --include-hidden                       # Open hidden files too
+```
+
+Rules from `.mlignore` are read from the current working directory only (no nesting); `--exclude` values are appended after the file's lines, so they win on conflicts. Invalid `--exclude` values abort the command; invalid `.mlignore` lines are skipped with a warning. The rules of each watch pattern are shown by `--status`, and are updated by re-running `ml` with the new flags (or via `ml --clear`).
+
+Notes:
+
+- **Explicit file arguments are never filtered**: `ml vendor/a.md --exclude 'vendor/**'` still opens `a.md`, and `ml '.git/**/*.md'` opens files under `.git/` (naming the dotted component literally in the pattern is treated as explicit).
+- **Excludes never remove files already shown in the sidebar**; they only affect what future discovery picks up.
+- A pattern anchored at the working directory does not apply to paths outside it: `ml /other -R --exclude 'vendor/**'` needs `vendor/` (base name) or a path relative to the current directory.
+- Nesting needs `**/`: use `**/node_modules/**` to exclude at any depth.
+
 ### Sidebar view modes
 
 The sidebar supports flat and tree view modes. Flat view shows file names only, while tree view displays the directory hierarchy.
@@ -240,7 +270,13 @@ $ ml --status --json
       {
         "name": "default",
         "files": 3,
-        "patterns": ["**/*.md"]
+        "patterns": ["**/*.md"],
+        "patternFilters": [
+          {
+            "pattern": "**/*.md",
+            "rules": { "base": "/Users/you/project", "excludes": ["**/node_modules/**"] }
+          }
+        ]
       }
     ]
   }
@@ -260,6 +296,9 @@ $ ml --status --json
 | `--watch` | `-w` | `false` | Treat directory and glob arguments as watch patterns |
 | `--unwatch` | | `false` | Remove watched patterns for the given directory or glob arguments |
 | `--recursive` | `-R` | `false` | Recurse into subdirectories when a directory is given |
+| `--exclude` | | | Glob pattern of files to exclude from discovery (repeatable) |
+| `--include-hidden` | | `false` | Include dot-prefixed hidden files and directories |
+| `--ignore-file` | | `.mlignore` | Ignore file read from the working directory (`''` disables) |
 | `--close` | | | Close files instead of opening them |
 | `--shutdown` | | | Shut down the running ml server |
 | `--restart` | | | Restart the running ml server |

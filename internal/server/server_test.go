@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/k1LoW/donegroup"
+
+	"github.com/Aliancn/mdlive/internal/ignore"
 )
 
 var (
@@ -2709,7 +2711,7 @@ func TestWalkSymlinkTree_ReportsUnresolvedEntries(t *testing.T) {
 		dirs = append(dirs, p)
 	}, func(p string) {
 		files = append(files, p)
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("walkSymlinkTree returned error: %v", err)
 	}
@@ -3011,4 +3013,463 @@ func TestWalkDirsForPattern_SkipsUnresolvableNonDirEntries(t *testing.T) {
 			t.Errorf("walkDirsForPattern did not hand over %q; visited=%q", want, visited)
 		}
 	}
+}
+
+// writeFilterTree lays out a directory tree exercising the discovery filters:
+// plain files, a hidden file, a hidden directory, a vendor directory, and a
+// nested docs directory.
+func writeFilterTree(t *testing.T, dir string) {
+	t.Helper()
+	for _, p := range []string{
+		filepath.Join(dir, "a.md"),
+		filepath.Join(dir, ".hidden.md"),
+		filepath.Join(dir, "vendor", "v.md"),
+		filepath.Join(dir, ".git", "g.md"),
+		filepath.Join(dir, "docs", "d.md"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("# "+filepath.Base(p)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func groupFilePaths(s *State, group string) []string {
+	var paths []string
+	for _, g := range s.Groups() {
+		if g.Name != group {
+			continue
+		}
+		for _, f := range g.Files {
+			paths = append(paths, f.Path)
+		}
+	}
+	return paths
+}
+
+func TestAddPatternWithRules(t *testing.T) {
+	dir := t.TempDir()
+	writeFilterTree(t, dir)
+	pattern := filepath.Join(dir, "**", "*.md")
+
+	t.Run("default rules hide dot paths", func(t *testing.T) {
+		s := newTestState(t)
+		entries, excluded, err := s.AddPatternWithRules(pattern, DefaultGroup, ignore.Rules{Base: dir})
+		if err != nil {
+			t.Fatalf("AddPatternWithRules returned error: %v", err)
+		}
+		if excluded != 1 {
+			// .hidden.md is dropped at file level; .git is pruned before its
+			// contents ever become matches.
+			t.Fatalf("got excluded=%d, want 1", excluded)
+		}
+		paths := groupFilePaths(s, DefaultGroup)
+		for _, want := range []string{
+			filepath.Join(dir, "a.md"),
+			filepath.Join(dir, "vendor", "v.md"),
+			filepath.Join(dir, "docs", "d.md"),
+		} {
+			if !slices.Contains(paths, want) {
+				t.Errorf("expected %q in %v", want, paths)
+			}
+		}
+		for _, unwanted := range []string{
+			filepath.Join(dir, ".hidden.md"),
+			filepath.Join(dir, ".git", "g.md"),
+		} {
+			if slices.Contains(paths, unwanted) {
+				t.Errorf("hidden file %q was added: %v", unwanted, paths)
+			}
+		}
+		if len(entries) != 3 {
+			t.Fatalf("got %d entries, want 3", len(entries))
+		}
+	})
+
+	t.Run("user excludes filter matches", func(t *testing.T) {
+		s := newTestState(t)
+		rules := ignore.Rules{Base: dir, Excludes: []string{"vendor/**"}}
+		_, excluded, err := s.AddPatternWithRules(pattern, DefaultGroup, rules)
+		if err != nil {
+			t.Fatalf("AddPatternWithRules returned error: %v", err)
+		}
+		paths := groupFilePaths(s, DefaultGroup)
+		if slices.Contains(paths, filepath.Join(dir, "vendor", "v.md")) {
+			t.Errorf("excluded file vendor/v.md was added: %v", paths)
+		}
+		if !slices.Contains(paths, filepath.Join(dir, "a.md")) {
+			t.Errorf("plain file a.md missing: %v", paths)
+		}
+		if excluded != 1 {
+			// vendor/ is pruned by its own rule; only .hidden.md reaches the
+			// filter as a match.
+			t.Fatalf("got excluded=%d, want 1", excluded)
+		}
+	})
+
+	t.Run("includeHidden admits dot paths", func(t *testing.T) {
+		s := newTestState(t)
+		rules := ignore.Rules{Base: dir, IncludeHidden: true}
+		if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, rules); err != nil {
+			t.Fatalf("AddPatternWithRules returned error: %v", err)
+		}
+		paths := groupFilePaths(s, DefaultGroup)
+		for _, want := range []string{
+			filepath.Join(dir, ".hidden.md"),
+			filepath.Join(dir, ".git", "g.md"),
+		} {
+			if !slices.Contains(paths, want) {
+				t.Errorf("hidden file %q missing with IncludeHidden: %v", want, paths)
+			}
+		}
+	})
+
+	t.Run("explicit dot pattern escapes the hidden rule", func(t *testing.T) {
+		s := newTestState(t)
+		pat := filepath.Join(dir, ".git", "**", "*.md")
+		if _, _, err := s.AddPatternWithRules(pat, DefaultGroup, ignore.Rules{Base: dir}); err != nil {
+			t.Fatalf("AddPatternWithRules returned error: %v", err)
+		}
+		paths := groupFilePaths(s, DefaultGroup)
+		if !slices.Contains(paths, filepath.Join(dir, ".git", "g.md")) {
+			t.Errorf("explicit .git file missing: %v", paths)
+		}
+	})
+
+	t.Run("reregistering with new rules admits previously excluded files", func(t *testing.T) {
+		s := newTestState(t)
+		rules := ignore.Rules{Base: dir, Excludes: []string{"vendor/**"}}
+		if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, rules); err != nil {
+			t.Fatalf("AddPatternWithRules returned error: %v", err)
+		}
+		if len(s.Patterns()) != 1 {
+			t.Fatalf("got %d patterns, want 1 after re-registration", len(s.Patterns()))
+		}
+		newRules := ignore.Rules{Base: dir, Excludes: []string{"docs/**"}}
+		entries, _, err := s.AddPatternWithRules(pattern, DefaultGroup, newRules)
+		if err != nil {
+			t.Fatalf("AddPatternWithRules returned error: %v", err)
+		}
+		var gotPaths []string
+		for _, e := range entries {
+			gotPaths = append(gotPaths, e.Path)
+		}
+		if !slices.Contains(gotPaths, filepath.Join(dir, "vendor", "v.md")) {
+			t.Fatalf("re-registration should admit vendor/v.md, got %v", gotPaths)
+		}
+		if slices.Contains(gotPaths, filepath.Join(dir, "docs", "d.md")) {
+			t.Fatalf("re-registration should still exclude docs/d.md, got %v", gotPaths)
+		}
+		paths := groupFilePaths(s, DefaultGroup)
+		if !slices.Contains(paths, filepath.Join(dir, "vendor", "v.md")) {
+			t.Errorf("newly admitted file missing: %v", paths)
+		}
+		// docs/d.md was added by the first registration and excludes never
+		// remove existing entries.
+		if !slices.Contains(paths, filepath.Join(dir, "docs", "d.md")) {
+			t.Errorf("existing entry docs/d.md was removed: %v", paths)
+		}
+	})
+
+	t.Run("re-registering with identical rules is a no-op", func(t *testing.T) {
+		s := newTestState(t)
+		rules := ignore.Rules{Base: dir, Excludes: []string{"vendor/**"}}
+		if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, rules); err != nil {
+			t.Fatalf("AddPatternWithRules returned error: %v", err)
+		}
+		entries, _, err := s.AddPatternWithRules(pattern, DefaultGroup, rules)
+		if err != nil {
+			t.Fatalf("AddPatternWithRules returned error: %v", err)
+		}
+		if entries != nil {
+			t.Fatalf("re-registration with identical rules returned entries %v, want nil", entries)
+		}
+	})
+
+	t.Run("excludes never remove existing entries", func(t *testing.T) {
+		s := newTestState(t)
+		if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, ignore.Rules{Base: dir}); err != nil {
+			t.Fatalf("AddPatternWithRules returned error: %v", err)
+		}
+		stricter := ignore.Rules{Base: dir, Excludes: []string{"vendor/**", "docs/**"}}
+		if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, stricter); err != nil {
+			t.Fatalf("AddPatternWithRules returned error: %v", err)
+		}
+		paths := groupFilePaths(s, DefaultGroup)
+		for _, want := range []string{
+			filepath.Join(dir, "vendor", "v.md"),
+			filepath.Join(dir, "docs", "d.md"),
+		} {
+			if !slices.Contains(paths, want) {
+				t.Errorf("existing entry %q was removed by stricter rules: %v", want, paths)
+			}
+		}
+	})
+
+	t.Run("invalid rules error", func(t *testing.T) {
+		s := newTestState(t)
+		rules := ignore.Rules{Base: dir, Excludes: []string{"bad["}}
+		if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, rules); err == nil {
+			t.Fatal("AddPatternWithRules returned nil error for invalid rules")
+		}
+		if len(s.Patterns()) != 0 {
+			t.Fatalf("got %d patterns, want 0 after failed registration", len(s.Patterns()))
+		}
+	})
+}
+
+func TestWalkSymlinkTree_Prune(t *testing.T) {
+	dir := t.TempDir()
+	writeFilterTree(t, dir)
+
+	prune := func(path string) bool {
+		return strings.HasPrefix(filepath.Base(path), ".")
+	}
+
+	var dirs, files []string
+	unresolved, err := walkSymlinkTree(dir, func(p string) {
+		dirs = append(dirs, p)
+	}, func(p string) {
+		files = append(files, p)
+	}, prune)
+	if err != nil {
+		t.Fatalf("walkSymlinkTree returned error: %v", err)
+	}
+	if len(unresolved) != 0 {
+		t.Fatalf("unresolved = %v, want empty", unresolved)
+	}
+	if slices.Contains(dirs, filepath.Join(dir, ".git")) {
+		t.Errorf("pruned directory .git was visited")
+	}
+	if slices.Contains(files, filepath.Join(dir, ".git", "g.md")) {
+		t.Errorf("file inside pruned directory was visited")
+	}
+	for _, want := range []string{
+		filepath.Join(dir, "a.md"),
+		filepath.Join(dir, "vendor", "v.md"),
+	} {
+		if !slices.Contains(files, want) {
+			t.Errorf("expected file %q in %v", want, files)
+		}
+	}
+}
+
+func TestHandleCreateForGlobs_FiltersDiscovery(t *testing.T) {
+	dir := t.TempDir()
+	writeFilterTree(t, dir)
+	pattern := filepath.Join(dir, "**", "*.md")
+
+	t.Run("created hidden directory is skipped", func(t *testing.T) {
+		s := newTestState(t)
+		if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, ignore.Rules{Base: dir}); err != nil {
+			t.Fatal(err)
+		}
+		before := len(groupFilePaths(s, DefaultGroup))
+		hiddenDir := filepath.Join(dir, ".newhidden")
+		if err := os.MkdirAll(filepath.Join(hiddenDir, "sub"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(hiddenDir, "sub", "x.md"), []byte("# X"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s.handleCreateForGlobs(hiddenDir)
+		if paths := groupFilePaths(s, DefaultGroup); len(paths) != before {
+			t.Fatalf("files added from hidden directory: %v", paths)
+		}
+	})
+
+	t.Run("created hidden file is skipped, plain file added", func(t *testing.T) {
+		s := newTestState(t)
+		if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, ignore.Rules{Base: dir}); err != nil {
+			t.Fatal(err)
+		}
+		before := len(groupFilePaths(s, DefaultGroup))
+		hidden := filepath.Join(dir, ".new.md")
+		if err := os.WriteFile(hidden, []byte("# H"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s.handleCreateForGlobs(hidden)
+		if paths := groupFilePaths(s, DefaultGroup); len(paths) != before {
+			t.Fatalf("hidden file was added: %v", paths)
+		}
+
+		plain := filepath.Join(dir, "new.md")
+		if err := os.WriteFile(plain, []byte("# N"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s.handleCreateForGlobs(plain)
+		paths := groupFilePaths(s, DefaultGroup)
+		if !slices.Contains(paths, plain) {
+			t.Fatalf("plain new file missing: %v", paths)
+		}
+	})
+}
+
+func TestHandleAddPattern_WithFilter(t *testing.T) {
+	dir := t.TempDir()
+	writeFilterTree(t, dir)
+	pattern := filepath.Join(dir, "**", "*.md")
+	handler := NewHandler(newTestState(t))
+
+	t.Run("filter in request body is applied", func(t *testing.T) {
+		body, err := json.Marshal(addPatternRequest{
+			patternRequest: patternRequest{Pattern: pattern, Group: DefaultGroup},
+			Filter:         &ignore.Rules{Base: dir, Excludes: []string{"vendor/**"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("POST", "/_/api/patterns", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("got status %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var resp AddPatternResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Matched != 2 {
+			t.Fatalf("got matched=%d, want 2 (a.md, docs/d.md)", resp.Matched)
+		}
+		if resp.Excluded != 1 {
+			t.Fatalf("got excluded=%d, want 1 (vendor is pruned, .hidden.md is filtered)", resp.Excluded)
+		}
+	})
+
+	t.Run("request without filter still works", func(t *testing.T) {
+		s := newTestState(t)
+		h := NewHandler(s)
+		body, err := json.Marshal(patternRequest{Pattern: pattern, Group: DefaultGroup})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("POST", "/_/api/patterns", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("got status %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		if paths := groupFilePaths(s, DefaultGroup); slices.ContainsFunc(paths, func(p string) bool {
+			return strings.Contains(p, "/.git/") || strings.Contains(p, ".hidden.md")
+		}) {
+			t.Fatalf("hidden files added without filter: %v", paths)
+		}
+	})
+
+	t.Run("invalid filter is rejected", func(t *testing.T) {
+		body, err := json.Marshal(addPatternRequest{
+			patternRequest: patternRequest{Pattern: pattern, Group: DefaultGroup},
+			Filter:         &ignore.Rules{Base: dir, Excludes: []string{"bad["}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("POST", "/_/api/patterns", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("got status %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("filter with excludes but no base is rejected", func(t *testing.T) {
+		body, err := json.Marshal(addPatternRequest{
+			patternRequest: patternRequest{Pattern: pattern, Group: DefaultGroup},
+			Filter:         &ignore.Rules{Excludes: []string{"vendor/**"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("POST", "/_/api/patterns", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("got status %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+}
+
+func TestHandleStatus_PatternFilters(t *testing.T) {
+	dir := t.TempDir()
+	writeFilterTree(t, dir)
+	pattern := filepath.Join(dir, "**", "*.md")
+	s := newTestState(t)
+	rules := ignore.Rules{Base: dir, Excludes: []string{"vendor/**"}, IncludeHidden: true}
+	if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, rules); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewHandler(s)
+	req := httptest.NewRequest("GET", "/_/api/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var resp struct {
+		Groups []struct {
+			Name           string              `json:"name"`
+			Patterns       []string            `json:"patterns,omitempty"`
+			PatternFilters []PatternFilterData `json:"patternFilters,omitempty"`
+		} `json:"groups"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Groups) != 1 {
+		t.Fatalf("got %d groups, want 1", len(resp.Groups))
+	}
+	filters := resp.Groups[0].PatternFilters
+	if len(filters) != 1 {
+		t.Fatalf("got %d patternFilters, want 1", len(filters))
+	}
+	if filters[0].Pattern != pattern {
+		t.Fatalf("got pattern %q, want %q", filters[0].Pattern, pattern)
+	}
+	if !slices.Equal(filters[0].Rules.Excludes, []string{"vendor/**"}) || !filters[0].Rules.IncludeHidden {
+		t.Fatalf("got rules %+v, want excludes [vendor/**] includeHidden true", filters[0].Rules)
+	}
+}
+
+func TestRestoreData_PatternFiltersRoundTrip(t *testing.T) {
+	t.Run("snapshot includes non-empty filters", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFilterTree(t, dir)
+		pattern := filepath.Join(dir, "**", "*.md")
+		s := newTestState(t)
+		rules := ignore.Rules{Base: dir, Excludes: []string{"vendor/**"}}
+		if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, rules); err != nil {
+			t.Fatal(err)
+		}
+		restoreFile, err := s.ExportState()
+		if err != nil {
+			t.Fatalf("ExportState returned error: %v", err)
+		}
+		defer os.Remove(restoreFile)
+		data, err := os.ReadFile(restoreFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rd RestoreData
+		if err := json.Unmarshal(data, &rd); err != nil {
+			t.Fatal(err)
+		}
+		if len(rd.PatternFilters) != 1 {
+			t.Fatalf("got %d patternFilters, want 1", len(rd.PatternFilters))
+		}
+		if rd.PatternFilters[0].Pattern != pattern || !rd.PatternFilters[0].Rules.Equal(rules) {
+			t.Fatalf("got %+v, want pattern %q with rules %+v", rd.PatternFilters[0], pattern, rules)
+		}
+	})
+
+	t.Run("restore JSON without patternFilters unmarshals", func(t *testing.T) {
+		var rd RestoreData
+		if err := json.Unmarshal([]byte(`{"groups":{"default":["/a.md"]},"patterns":{"default":["/x/*.md"]}}`), &rd); err != nil {
+			t.Fatalf("failed to unmarshal legacy restore data: %v", err)
+		}
+		if len(rd.PatternFilters) != 0 {
+			t.Fatalf("got %d patternFilters, want 0 for legacy data", len(rd.PatternFilters))
+		}
+	})
 }

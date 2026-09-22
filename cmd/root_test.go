@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Aliancn/mdlive/internal/ignore"
 	"github.com/Aliancn/mdlive/internal/server"
 )
 
@@ -211,15 +213,7 @@ func TestResolveUnwatchArgs_RecursiveDirectory(t *testing.T) {
 	// Set up a mock server that returns patterns for the group.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := statusResponse{
-			Groups: []struct {
-				Name  string `json:"name"`
-				Files []struct {
-					Name string `json:"name"`
-					ID   string `json:"id"`
-					Path string `json:"path"`
-				} `json:"files"`
-				Patterns []string `json:"patterns,omitempty"`
-			}{
+			Groups: []statusGroupEntry{
 				{
 					Name: "default",
 					Patterns: []string{
@@ -258,15 +252,7 @@ func TestResolveUnwatchArgs_RecursiveNoMatch(t *testing.T) {
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := statusResponse{
-			Groups: []struct {
-				Name  string `json:"name"`
-				Files []struct {
-					Name string `json:"name"`
-					ID   string `json:"id"`
-					Path string `json:"path"`
-				} `json:"files"`
-				Patterns []string `json:"patterns,omitempty"`
-			}{
+			Groups: []statusGroupEntry{
 				{
 					Name:     "default",
 					Patterns: []string{"/other/path/*.md"},
@@ -295,15 +281,7 @@ func TestResolveUnwatchArgs_RecursiveDeletedDirectory(t *testing.T) {
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := statusResponse{
-			Groups: []struct {
-				Name  string `json:"name"`
-				Files []struct {
-					Name string `json:"name"`
-					ID   string `json:"id"`
-					Path string `json:"path"`
-				} `json:"files"`
-				Patterns []string `json:"patterns,omitempty"`
-			}{
+			Groups: []statusGroupEntry{
 				{
 					Name: "default",
 					Patterns: []string{
@@ -346,15 +324,7 @@ func TestResolveUnwatchArgs_RecursiveGroupNotFound(t *testing.T) {
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := statusResponse{
-			Groups: []struct {
-				Name  string `json:"name"`
-				Files []struct {
-					Name string `json:"name"`
-					ID   string `json:"id"`
-					Path string `json:"path"`
-				} `json:"files"`
-				Patterns []string `json:"patterns,omitempty"`
-			}{
+			Groups: []statusGroupEntry{
 				{
 					Name:     "other",
 					Patterns: []string{"/other/*.md"},
@@ -521,7 +491,7 @@ func TestFilterValidRestoreData(t *testing.T) {
 			},
 		}
 
-		filesByGroup, _, _ := filterValidRestoreData(rd)
+		filesByGroup, _, _, _ := filterValidRestoreData(rd)
 		if len(filesByGroup["default"]) != 1 {
 			t.Fatalf("got %d files, want 1", len(filesByGroup["default"]))
 		}
@@ -537,7 +507,7 @@ func TestFilterValidRestoreData(t *testing.T) {
 			},
 		}
 
-		filesByGroup, _, _ := filterValidRestoreData(rd)
+		filesByGroup, _, _, _ := filterValidRestoreData(rd)
 		if _, ok := filesByGroup["docs"]; ok {
 			t.Fatal("group with all missing files should not appear in result")
 		}
@@ -551,7 +521,7 @@ func TestFilterValidRestoreData(t *testing.T) {
 			},
 		}
 
-		_, patternsByGroup, _ := filterValidRestoreData(rd)
+		_, patternsByGroup, _, _ := filterValidRestoreData(rd)
 		if len(patternsByGroup["default"]) != 1 {
 			t.Fatalf("got %d patterns, want 1", len(patternsByGroup["default"]))
 		}
@@ -563,7 +533,7 @@ func TestFilterValidRestoreData(t *testing.T) {
 	t.Run("empty restore data returns empty results", func(t *testing.T) {
 		rd := &server.RestoreData{}
 
-		filesByGroup, patternsByGroup, _ := filterValidRestoreData(rd)
+		filesByGroup, patternsByGroup, _, _ := filterValidRestoreData(rd)
 		if len(filesByGroup) != 0 {
 			t.Fatalf("got %d groups, want 0", len(filesByGroup))
 		}
@@ -1034,7 +1004,7 @@ func TestAddToRunningServer_PatternsAllFail(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 
 	status := &statusResponse{PID: 12345}
-	err := addToRunningServer(addr, status, nil, map[string][]string{"default": {"*.md"}}, nil)
+	err := addToRunningServer(addr, status, nil, map[string][]patternSpec{"default": {{Pattern: "*.md"}}}, nil)
 	if err == nil {
 		t.Fatal("expected error when every pattern POST fails, got nil")
 	}
@@ -1060,7 +1030,7 @@ func TestAddToRunningServer_PatternWithZeroMatches(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 
 	status := &statusResponse{PID: 12345}
-	err := addToRunningServer(addr, status, nil, map[string][]string{"default": {"*.md"}}, nil)
+	err := addToRunningServer(addr, status, nil, map[string][]patternSpec{"default": {{Pattern: "*.md"}}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1106,7 +1076,7 @@ func TestResolveArgs_Directory(t *testing.T) {
 	writeTestFile(t, filepath.Join(dir, "b.md"), []byte("# B"))
 	writeTestFile(t, filepath.Join(dir, "c.txt"), []byte("text"))
 
-	files, patterns, err := resolveArgs([]string{dir}, false, false)
+	files, patterns, err := resolveArgs([]string{dir}, false, false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1129,7 +1099,7 @@ func TestResolveArgs_DirectoryNaturalOrder(t *testing.T) {
 		writeTestFile(t, filepath.Join(dir, name), []byte("# "+name))
 	}
 
-	files, _, err := resolveArgs([]string{dir}, false, false)
+	files, _, err := resolveArgs([]string{dir}, false, false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1154,19 +1124,19 @@ func TestResolveArgs_DirectoryWithWatch(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "a.md"), []byte("# A"))
 
-	files, patterns, err := resolveArgs([]string{dir}, true, false)
+	files, specs, err := resolveArgs([]string{dir}, true, false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(files) != 0 {
 		t.Fatalf("got %d files, want 0", len(files))
 	}
-	if len(patterns) != 1 {
-		t.Fatalf("got %d patterns, want 1", len(patterns))
+	if len(specs) != 1 {
+		t.Fatalf("got %d specs, want 1", len(specs))
 	}
 	want := filepath.Join(dir, "*.md")
-	if patterns[0] != want {
-		t.Errorf("got pattern %q, want %q", patterns[0], want)
+	if specs[0].Pattern != want {
+		t.Errorf("got pattern %q, want %q", specs[0].Pattern, want)
 	}
 }
 
@@ -1174,19 +1144,19 @@ func TestResolveArgs_DirectoryWithWatchRecursive(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "a.md"), []byte("# A"))
 
-	files, patterns, err := resolveArgs([]string{dir}, true, true)
+	files, specs, err := resolveArgs([]string{dir}, true, true, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(files) != 0 {
 		t.Fatalf("got %d files, want 0", len(files))
 	}
-	if len(patterns) != 1 {
-		t.Fatalf("got %d patterns, want 1", len(patterns))
+	if len(specs) != 1 {
+		t.Fatalf("got %d specs, want 1", len(specs))
 	}
 	want := filepath.Join(dir, "**/*.md")
-	if patterns[0] != want {
-		t.Errorf("got pattern %q, want %q", patterns[0], want)
+	if specs[0].Pattern != want {
+		t.Errorf("got pattern %q, want %q", specs[0].Pattern, want)
 	}
 }
 
@@ -1200,7 +1170,7 @@ func TestResolveArgs_DirectoryRecursive(t *testing.T) {
 	writeTestFile(t, filepath.Join(sub, "b.md"), []byte("# B"))
 	writeTestFile(t, filepath.Join(sub, "c.txt"), []byte("text"))
 
-	files, patterns, err := resolveArgs([]string{dir}, false, true)
+	files, patterns, err := resolveArgs([]string{dir}, false, true, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1221,18 +1191,18 @@ func TestResolveArgs_GlobPositional_WatchMode(t *testing.T) {
 	writeTestFile(t, filepath.Join(dir, "a.md"), []byte("# A"))
 	pattern := filepath.Join(dir, "*.md")
 
-	files, patterns, err := resolveArgs([]string{pattern}, true, false)
+	files, specs, err := resolveArgs([]string{pattern}, true, false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(files) != 0 {
 		t.Fatalf("got %d files, want 0", len(files))
 	}
-	if len(patterns) != 1 {
-		t.Fatalf("got %d patterns, want 1: %v", len(patterns), patterns)
+	if len(specs) != 1 {
+		t.Fatalf("got %d specs, want 1: %v", len(specs), specs)
 	}
-	if !filepath.IsAbs(patterns[0]) {
-		t.Errorf("pattern %q is not absolute", patterns[0])
+	if !filepath.IsAbs(specs[0].Pattern) {
+		t.Errorf("pattern %q is not absolute", specs[0].Pattern)
 	}
 }
 
@@ -1242,7 +1212,7 @@ func TestResolveArgs_GlobPositional_NonWatch(t *testing.T) {
 	writeTestFile(t, filepath.Join(dir, "b.md"), []byte("# B"))
 	pattern := filepath.Join(dir, "*.md")
 
-	files, patterns, err := resolveArgs([]string{pattern}, false, false)
+	files, patterns, err := resolveArgs([]string{pattern}, false, false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1257,7 +1227,7 @@ func TestResolveArgs_GlobPositional_NonWatch(t *testing.T) {
 func TestResolveArgs_EmptyDirectory(t *testing.T) {
 	dir := t.TempDir()
 
-	_, _, err := resolveArgs([]string{dir}, false, false)
+	_, _, err := resolveArgs([]string{dir}, false, false, nil)
 	if err == nil {
 		t.Fatal("expected error for empty directory")
 	}
@@ -1383,7 +1353,7 @@ func TestReadStdin(t *testing.T) {
 func TestResolveArgs_EmptyDirectoryWithWatch(t *testing.T) {
 	dir := t.TempDir()
 
-	files, patterns, err := resolveArgs([]string{dir}, true, false)
+	files, patterns, err := resolveArgs([]string{dir}, true, false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1402,7 +1372,7 @@ func TestResolveArgs_MixedFilesAndDirs(t *testing.T) {
 	singleFile := filepath.Join(t.TempDir(), "standalone.md")
 	writeTestFile(t, singleFile, []byte("# Standalone"))
 
-	files, patterns, err := resolveArgs([]string{dir, singleFile}, false, false)
+	files, patterns, err := resolveArgs([]string{dir, singleFile}, false, false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1412,4 +1382,273 @@ func TestResolveArgs_MixedFilesAndDirs(t *testing.T) {
 	if len(files) != 2 {
 		t.Fatalf("got %d files, want 2: %v", len(files), files)
 	}
+}
+
+// withFilterFlags sets the discovery-filter flags and restores them afterwards.
+func withFilterFlags(t *testing.T, excl []string, hidden bool, ignoreFileName string) {
+	t.Helper()
+	origExcludes, origIncludeHidden, origIgnoreFile := excludes, includeHidden, ignoreFile
+	excludes = excl
+	includeHidden = hidden
+	ignoreFile = ignoreFileName
+	t.Cleanup(func() {
+		excludes = origExcludes
+		includeHidden = origIncludeHidden
+		ignoreFile = origIgnoreFile
+	})
+}
+
+func TestResolveFilter(t *testing.T) {
+	cwd := t.TempDir()
+
+	t.Run("missing ignore file is not an error", func(t *testing.T) {
+		withFilterFlags(t, nil, false, ".mlignore")
+		f, err := resolveFilter(cwd)
+		if err != nil {
+			t.Fatalf("resolveFilter returned error: %v", err)
+		}
+		if f.Rules().Base != cwd {
+			t.Fatalf("rules base = %q, want %q", f.Rules().Base, cwd)
+		}
+		if len(f.Rules().Excludes) != 0 {
+			t.Fatalf("rules excludes = %v, want empty", f.Rules().Excludes)
+		}
+	})
+
+	t.Run("ignore file lines precede exclude flags", func(t *testing.T) {
+		os.WriteFile(filepath.Join(cwd, ".mlignore"), []byte("vendor/**\n*.tmp\n"), 0o600) //nolint:errcheck
+		withFilterFlags(t, []string{"drafts/**"}, false, ".mlignore")
+		f, err := resolveFilter(cwd)
+		if err != nil {
+			t.Fatalf("resolveFilter returned error: %v", err)
+		}
+		want := []string{"vendor/**", "*.tmp", "drafts/**"}
+		if !slices.Equal(f.Rules().Excludes, want) {
+			t.Fatalf("excludes = %v, want %v", f.Rules().Excludes, want)
+		}
+	})
+
+	t.Run("invalid exclude flag is an error", func(t *testing.T) {
+		withFilterFlags(t, []string{"bad["}, false, "")
+		if _, err := resolveFilter(cwd); err == nil {
+			t.Fatal("resolveFilter returned nil error for invalid --exclude")
+		}
+	})
+
+	t.Run("invalid ignore line is skipped with the rest kept", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, ".mlignore"), []byte("vendor/**\nbad[\n"), 0o600) //nolint:errcheck
+		withFilterFlags(t, nil, false, ".mlignore")
+		f, err := resolveFilter(dir)
+		if err != nil {
+			t.Fatalf("resolveFilter returned error: %v", err)
+		}
+		if !slices.Equal(f.Rules().Excludes, []string{"vendor/**"}) {
+			t.Fatalf("excludes = %v, want [vendor/**]", f.Rules().Excludes)
+		}
+	})
+
+	t.Run("empty ignore-file name disables the file", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, ".mlignore"), []byte("vendor/**\n"), 0o600) //nolint:errcheck
+		withFilterFlags(t, nil, false, "")
+		f, err := resolveFilter(dir)
+		if err != nil {
+			t.Fatalf("resolveFilter returned error: %v", err)
+		}
+		if len(f.Rules().Excludes) != 0 {
+			t.Fatalf("excludes = %v, want empty with empty ignore-file name", f.Rules().Excludes)
+		}
+	})
+}
+
+func TestResolveArgs_Filtering(t *testing.T) {
+	dir := t.TempDir()
+	for _, p := range []string{
+		filepath.Join(dir, "a.md"),
+		filepath.Join(dir, ".hidden.md"),
+		filepath.Join(dir, "vendor", "v.md"),
+		filepath.Join(dir, "docs", "d.md"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("# "+filepath.Base(p)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("hidden files excluded by default", func(t *testing.T) {
+		withFilterFlags(t, nil, false, "")
+		filter, ferr := resolveFilter(dir)
+		if ferr != nil {
+			t.Fatalf("resolveFilter: %v", ferr)
+		}
+		files, _, err := resolveArgs([]string{dir}, false, true, filter)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if slices.Contains(files, filepath.Join(dir, ".hidden.md")) {
+			t.Errorf("hidden file was not excluded: %v", files)
+		}
+		if !slices.Contains(files, filepath.Join(dir, "a.md")) {
+			t.Errorf("plain file missing: %v", files)
+		}
+	})
+
+	t.Run("exclude flag filters expansion", func(t *testing.T) {
+		withFilterFlags(t, []string{"vendor/**"}, false, "")
+		filter, ferr := resolveFilter(dir)
+		if ferr != nil {
+			t.Fatalf("resolveFilter: %v", ferr)
+		}
+		files, _, err := resolveArgs([]string{dir}, false, true, filter)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if slices.Contains(files, filepath.Join(dir, "vendor", "v.md")) {
+			t.Errorf("excluded file was not filtered: %v", files)
+		}
+	})
+
+	t.Run("exclude counts appear in error message", func(t *testing.T) {
+		withFilterFlags(t, []string{"**"}, false, "")
+		filter, ferr := resolveFilter(dir)
+		if ferr != nil {
+			t.Fatalf("resolveFilter: %v", ferr)
+		}
+		_, _, err := resolveArgs([]string{dir}, false, true, filter)
+		if err == nil {
+			t.Fatal("expected error when everything is excluded")
+		}
+		if !strings.Contains(err.Error(), "excluded by --exclude") {
+			t.Fatalf("error %q does not mention the exclusion count", err.Error())
+		}
+	})
+
+	t.Run("explicit file arguments bypass filtering", func(t *testing.T) {
+		withFilterFlags(t, []string{"**"}, false, "")
+		filter, ferr := resolveFilter(dir)
+		if ferr != nil {
+			t.Fatalf("resolveFilter: %v", ferr)
+		}
+		files, _, err := resolveArgs([]string{filepath.Join(dir, "vendor", "v.md")}, false, true, filter)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(files) != 1 || files[0] != filepath.Join(dir, "vendor", "v.md") {
+			t.Fatalf("explicit file was filtered: %v", files)
+		}
+	})
+
+	t.Run("includeHidden admits hidden files", func(t *testing.T) {
+		withFilterFlags(t, nil, true, "")
+		filter, ferr := resolveFilter(dir)
+		if ferr != nil {
+			t.Fatalf("resolveFilter: %v", ferr)
+		}
+		files, _, err := resolveArgs([]string{dir}, false, true, filter)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !slices.Contains(files, filepath.Join(dir, ".hidden.md")) {
+			t.Errorf("hidden file missing with --include-hidden: %v", files)
+		}
+	})
+}
+
+func TestPostPatterns_SendsFilter(t *testing.T) {
+	var gotBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /_/api/patterns", func(w http.ResponseWriter, r *http.Request) {
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("failed to read body: %v", err)
+		}
+		if err := json.Unmarshal(data, &gotBody); err != nil {
+			t.Errorf("failed to decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(server.AddPatternResponse{Matched: 0}) //nolint:errcheck
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	client := ts.Client()
+
+	specs := []patternSpec{{Pattern: "/repo/**/*.md", Rules: ignore.Rules{Base: "/repo", Excludes: []string{"vendor/**"}}}}
+	entries, added := postPatterns(client, addr, "default", specs)
+	if added != 1 || len(entries) != 0 {
+		t.Fatalf("got added=%d entries=%d, want added=1 entries=0", added, len(entries))
+	}
+	filter, ok := gotBody["filter"].(map[string]any)
+	if !ok {
+		t.Fatalf("request body has no filter object: %v", gotBody)
+	}
+	if filter["base"] != "/repo" || !slices.Equal(stringSlice(filter["excludes"]), []string{"vendor/**"}) {
+		t.Fatalf("got filter %v, want base=/repo excludes=[vendor/**]", filter)
+	}
+}
+
+func stringSlice(v any) []string {
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func TestMergePatternSpecs(t *testing.T) {
+	t.Run("restored first, new appended, duplicates skipped", func(t *testing.T) {
+		base := []patternSpec{{Pattern: "a"}, {Pattern: "b"}}
+		additional := []patternSpec{{Pattern: "b", Rules: ignore.Rules{Base: "/repo", Excludes: []string{"x/**"}}}, {Pattern: "c"}}
+		got := mergePatternSpecs(base, additional)
+		if len(got) != 3 || got[0].Pattern != "a" || got[1].Pattern != "b" || got[2].Pattern != "c" {
+			t.Fatalf("got %v", got)
+		}
+		// Conflicting rules take the latest invocation's.
+		if got[1].Rules.Base != "/repo" {
+			t.Fatalf("conflicting spec kept old rules: %+v", got[1])
+		}
+	})
+
+	t.Run("empty additional keeps base", func(t *testing.T) {
+		base := []patternSpec{{Pattern: "a"}}
+		if got := mergePatternSpecs(base, nil); len(got) != 1 || got[0].Pattern != "a" {
+			t.Fatalf("got %v", got)
+		}
+	})
+}
+
+func TestRestorePatternSpecs(t *testing.T) {
+	t.Run("filters are attached to their patterns", func(t *testing.T) {
+		patterns := map[string][]string{"default": {"/x/*.md", "/y/*.md"}}
+		filters := []server.PatternFilterData{{
+			Pattern: "/x/*.md",
+			Rules:   ignore.Rules{Base: "/repo", Excludes: []string{"vendor/**"}},
+		}}
+		specs := restorePatternSpecs(patterns, filters)
+		if len(specs["default"]) != 2 {
+			t.Fatalf("got %d specs, want 2", len(specs["default"]))
+		}
+		if specs["default"][0].Pattern != "/x/*.md" || len(specs["default"][0].Rules.Excludes) != 1 {
+			t.Fatalf("first spec should carry the persisted rules: %+v", specs["default"][0])
+		}
+		if specs["default"][1].Pattern != "/y/*.md" || !specs["default"][1].Rules.Empty() {
+			t.Fatalf("pattern without filter should get zero rules: %+v", specs["default"][1])
+		}
+	})
+
+	t.Run("legacy backup without filters yields zero rules", func(t *testing.T) {
+		specs := restorePatternSpecs(map[string][]string{"default": {"/x/*.md"}}, nil)
+		if !specs["default"][0].Rules.Empty() {
+			t.Fatalf("legacy pattern should get zero rules: %+v", specs["default"][0])
+		}
+	})
 }
