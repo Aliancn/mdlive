@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"net"
@@ -25,12 +26,12 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/k1LoW/errors"
 
-	"github.com/k1LoW/donegroup"
 	"github.com/Aliancn/mdlive/internal/backup"
 	"github.com/Aliancn/mdlive/internal/ignore"
 	"github.com/Aliancn/mdlive/internal/logfile"
 	"github.com/Aliancn/mdlive/internal/server"
 	"github.com/Aliancn/mdlive/version"
+	"github.com/k1LoW/donegroup"
 	"github.com/muesli/termenv"
 	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
@@ -72,8 +73,12 @@ var (
 	recursive                    bool
 	closeFiles                   bool
 	clearBackup                  bool
+	pruneMode                    bool
+	pruneBackups                 bool
+	verbose                      bool
 	jsonOutput                   bool
 	dangerouslyAllowRemoteAccess bool
+	reloadMode                   bool
 	excludes                     []string
 	includeHidden                bool
 	ignoreFile                   string
@@ -199,8 +204,28 @@ Excluding files:
   anchored at the working directory. '!'-prefixed lines re-include
   files, and the last matching line wins. Files already shown in the
   sidebar are never removed by excludes. Registered rules are shown by
-  --status and updated by re-running ml with the new flags (or via
-  ml --clear).
+  --status and applied to already-registered patterns with ml --reload.
+
+Applying rule changes:
+  Editing .mlignore (or passing new --exclude flags) does not change
+  what is already in the sidebar until the rules are re-applied.
+
+  $ ml --reload                       Re-read .mlignore and re-apply rules
+  $ ml --reload --exclude 'new/**'    Also swap in new --exclude flags
+
+  Files the new rules no longer admit are removed from the sidebar;
+  explicitly named files are never removed. Patterns registered from
+  another directory are skipped (run ml --reload from there).
+
+Housekeeping:
+  ml keeps a rotating log and a saved session per port under
+  $XDG_STATE_HOME/ml/. Client-only commands (--status, --shutdown, ...)
+  do not create log files. Servers that exited without --shutdown leave
+  both behind; ml --prune removes the logs of ports that no longer
+  answer (kept saved sessions are only removed with --prune-backups).
+
+  $ ml --prune                        Remove stale log files
+  $ ml --prune --prune-backups        Also remove saved sessions (asks)
 
 WARNING: --bind with a non-loopback address:
   Binding to a non-localhost address (e.g. 0.0.0.0) exposes ml to the
@@ -237,6 +262,10 @@ func init() {
 	rootCmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "Recurse into subdirectories when a directory is given")
 	rootCmd.Flags().BoolVar(&closeFiles, "close", false, "Close files instead of opening them")
 	rootCmd.Flags().BoolVar(&clearBackup, "clear", false, "Clear saved session for the specified port")
+	rootCmd.Flags().BoolVar(&pruneMode, "prune", false, "Remove log files of servers that are no longer running")
+	rootCmd.Flags().BoolVar(&pruneBackups, "prune-backups", false, "With --prune, also remove saved sessions of stopped servers (asks for confirmation)")
+	rootCmd.Flags().BoolVar(&reloadMode, "reload", false, "Re-apply .mlignore and --exclude rules to patterns registered from the current directory")
+	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "List every deeplink and print the full startup summary")
 	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output structured data as JSON to stdout")
 	rootCmd.Flags().BoolVar(&dangerouslyAllowRemoteAccess, "dangerously-allow-remote-access", false, "Allow remote access without authentication. Recommended only for trusted networks.")
 	rootCmd.Flags().StringArrayVar(&excludes, "exclude", nil, "Glob pattern of files to exclude from discovery (repeatable)")
@@ -245,7 +274,13 @@ func init() {
 }
 
 func run(cmd *cobra.Command, args []string) (retErr error) {
-	if !foreground || restore != "" {
+	// Client-only verbs talk to an existing server (or the filesystem) and
+	// never run one; giving each of them a rotating log file would create a
+	// phantom entry that --status then reports as a stale server. Their
+	// warnings go to stderr, where the user is looking anyway.
+	clientOnly := clearBackup || statusServer || shutdownServer || restartServer ||
+		unwatchMode || closeFiles || pruneMode || reloadMode
+	if (!foreground || restore != "") && !clientOnly {
 		logCleanup, err := logfile.Setup(port)
 		if err != nil {
 			slog.Warn("failed to setup log file, using stderr", "error", err)
@@ -271,6 +306,10 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 		wasServerRunning := false
 		if _, err := probeServer(addr, probeTimeoutFast); err == nil {
 			wasServerRunning = true
+		} else if errors.Is(err, errForeignServer) {
+			// Clearing the session of another application's server is out of
+			// scope; refuse instead of silently ignoring it.
+			return err
 		}
 		hasBackup := backup.Exists(port)
 
@@ -317,6 +356,19 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 			fmt.Fprintf(os.Stderr, "ml: cleared saved session for port %d\n", port)
 		}
 		return nil
+	}
+
+	if pruneBackups && !pruneMode {
+		return fmt.Errorf("cannot use --prune-backups without --prune")
+	}
+	if pruneMode {
+		if watchMode {
+			return fmt.Errorf("cannot use --prune with --watch")
+		}
+		if len(args) > 0 {
+			return fmt.Errorf("cannot use --prune with file arguments")
+		}
+		return doPrune()
 	}
 
 	if statusServer {
@@ -376,12 +428,22 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 		return err
 	}
 
+	if reloadMode {
+		if watchMode {
+			return fmt.Errorf("cannot use --reload with --watch")
+		}
+		if len(args) > 0 {
+			return fmt.Errorf("cannot use --reload with file arguments")
+		}
+		return doReload(addr, cmd.Flags().Changed("exclude"), cmd.Flags().Changed("include-hidden"))
+	}
+
 	if restore != "" {
 		filesByGroup, patternsByGroup, patternFilters, uploadedFiles, err := loadRestoreData(restore)
 		if err != nil {
 			return fmt.Errorf("failed to restore state: %w", err)
 		}
-		return startServer(cmd.Context(), addr, filesByGroup, restorePatternSpecs(patternsByGroup, patternFilters), uploadedFiles)
+		return startServer(cmd.Context(), addr, filesByGroup, restorePatternSpecs(patternsByGroup, patternFilters), uploadedFiles, serveSummaryData{})
 	}
 
 	resolved, err := server.ResolveGroupName(target)
@@ -441,6 +503,8 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 		if _, err := probeServer(addr, probeTimeoutDefault); err == nil {
 			openBrowser(addr)
 			return nil
+		} else if errors.Is(err, errForeignServer) {
+			return err
 		}
 	}
 
@@ -448,6 +512,7 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 	if stdinData != nil || len(files) > 0 || len(patternSpecs) > 0 {
 		result, probeErr := probeServer(addr, probeTimeoutFast)
 		if probeErr == nil {
+			noteLegacyServer(addr, result)
 			isNewGroup := !slices.Contains(result.groups, target)
 
 			var deeplinks []deeplinkEntry
@@ -486,6 +551,10 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 				openBrowser(addr)
 			}
 			return nil
+		} else if errors.Is(probeErr, errForeignServer) {
+			// A live server identified itself as another application; pushing
+			// files into it would silently corrupt its state.
+			return probeErr
 		}
 	}
 
@@ -544,10 +613,38 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
-	if foreground {
-		return startServer(cmd.Context(), addr, filesByGroup, specsByGroup, uploadedFiles)
+	// The startup summary reports what came from the backup and what came
+	// from this invocation; the server side only sees the merged result.
+	summary := serveSummaryData{
+		RestoredFiles:    countGroupFiles(restoredFiles),
+		RestoredPatterns: countGroupPatterns(restoredSpecs),
+		AddedFromArgs:    len(files) + len(patternSpecs),
 	}
-	return startBackground(addr, filesByGroup, specsByGroup, uploadedFiles)
+	if stdinData != nil {
+		summary.AddedFromArgs++
+	}
+	if foreground {
+		return startServer(cmd.Context(), addr, filesByGroup, specsByGroup, uploadedFiles, summary)
+	}
+	return startBackground(addr, filesByGroup, specsByGroup, uploadedFiles, summary)
+}
+
+// countGroupFiles sums the file counts of a group → paths map.
+func countGroupFiles(filesByGroup map[string][]string) int {
+	n := 0
+	for _, files := range filesByGroup {
+		n += len(files)
+	}
+	return n
+}
+
+// countGroupPatterns sums the pattern counts of a group → specs map.
+func countGroupPatterns(specsByGroup map[string][]patternSpec) int {
+	n := 0
+	for _, specs := range specsByGroup {
+		n += len(specs)
+	}
+	return n
 }
 
 // mergeGroups merges base and additional group maps, with base entries first.
@@ -790,13 +887,23 @@ func fetchRegisteredPatterns(addr, groupName string) ([]string, error) {
 // values, so that the flags win under last-match-wins. The returned filter is
 // never nil: even with no rules it enforces the default hidden-path rule.
 func resolveFilter(cwd string) (*ignore.Filter, error) {
-	rules := ignore.Rules{Base: filepath.ToSlash(cwd)}
+	// IgnoreFile and FlagExcludes record where the rules came from, so
+	// `ml --reload` can re-read the ignore file and swap the --exclude
+	// values without touching the other half.
+	rules := ignore.Rules{
+		Base:         filepath.ToSlash(cwd),
+		IgnoreFile:   ignoreFile,
+		FlagExcludes: append([]string{}, excludes...),
+	}
 	if ignoreFile != "" {
 		lines, err := ignore.ReadLines(filepath.Join(cwd, ignoreFile))
 		if err != nil {
 			return nil, fmt.Errorf("cannot read %s: %w", ignoreFile, err)
 		}
 		for _, line := range lines {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
 			if err := ignore.ValidateLine(line); err != nil {
 				fmt.Fprintf(os.Stderr, "ml: warning: ignoring invalid line in %s: %v\n", ignoreFile, err)
 				continue
@@ -1023,10 +1130,10 @@ type jsonServeOutput struct {
 }
 
 type jsonStatusGroupEntry struct {
-	Name           string                      `json:"name"`
-	Files          int                         `json:"files"`
-	Patterns       []string                    `json:"patterns,omitempty"`
-	PatternFilters []server.PatternFilterData  `json:"patternFilters,omitempty"`
+	Name           string                     `json:"name"`
+	Files          int                        `json:"files"`
+	Patterns       []string                   `json:"patterns,omitempty"`
+	PatternFilters []server.PatternFilterData `json:"patternFilters,omitempty"`
 }
 
 type jsonStatusEntry struct {
@@ -1035,7 +1142,11 @@ type jsonStatusEntry struct {
 	PID      int                    `json:"pid,omitempty"`
 	Version  string                 `json:"version,omitempty"`
 	Revision string                 `json:"revision,omitempty"`
+	App      string                 `json:"app,omitempty"`
+	Legacy   bool                   `json:"legacy,omitempty"`
+	Stale    bool                   `json:"stale,omitempty"`
 	Groups   []jsonStatusGroupEntry `json:"groups,omitempty"`
+	Watcher  *server.WatcherStatus  `json:"watcher,omitempty"`
 }
 
 func writeJSON(v any) {
@@ -1118,11 +1229,23 @@ func deeplinkDisplayNames(entries []deeplinkEntry) []string {
 	return displayNames(pathEntries)
 }
 
+// deeplinkVerboseLimit is how many deeplinks print in full before the list
+// truncates with a hint. Sessions opened with one or a few files — the common
+// case — always print every link.
+const deeplinkVerboseLimit = 10
+
 func printDeeplinks(entries []deeplinkEntry) {
 	if len(entries) == 0 {
 		return
 	}
 	names := deeplinkDisplayNames(entries)
+	if len(entries) > deeplinkVerboseLimit && !verbose {
+		for i := range 3 {
+			fmt.Printf("  %s  %s\n", entries[i].URL, names[i])
+		}
+		fmt.Fprintf(os.Stderr, "ml: … and %d more file(s) — re-run with --verbose to list every link\n", len(entries)-3)
+		return
+	}
 	for i, e := range entries {
 		fmt.Printf("  %s  %s\n", e.URL, names[i])
 	}
@@ -1144,13 +1267,102 @@ func emitServeOutput(addr string, deeplinks []deeplinkEntry, printURL bool) {
 	}
 }
 
-type probeResult struct {
-	client *http.Client
-	groups []string
+// largePattern thresholds: a pattern expanding beyond them risks exhausting
+// the OS watch limit, which on macOS surfaces as "FSEventStreamStart failed".
+var (
+	watchSummaryWarnFiles = 5000
+	watchSummaryWarnDirs  = 1000
+	watchSummaryWarnTotal = 2000 // combined, only when symlinks are involved
+)
+
+// warnLargePattern tells the user up front when one pattern's discovery tree
+// is big enough to be at risk, while there is still time to add a .mlignore.
+func warnLargePattern(pattern string, stats server.PatternStats) {
+	total := stats.Dirs + stats.Files
+	symlinked := stats.SymlinkedDirs + stats.SymlinkedFiles
+	if stats.Dirs <= watchSummaryWarnDirs && stats.Files <= watchSummaryWarnFiles &&
+		(symlinked == 0 || total <= watchSummaryWarnTotal) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "ml: WARNING: %s expands to %d entries (%d dirs, %d files), %d of them reached through symlinks.\n",
+		pattern, total, stats.Dirs, stats.Files, symlinked)
+	fmt.Fprintf(os.Stderr, "    Large trees multiply watcher registrations and can exhaust OS limits (on macOS: \"FSEventStreamStart failed\").\n")
+	fmt.Fprintf(os.Stderr, "    Add a .mlignore with one line per external tree (e.g. \"external-repo/**\") and re-run, or watch a narrower pattern.\n")
+	slog.Warn("large pattern expansion may exhaust the OS watch limit", "pattern", pattern, "dirs", stats.Dirs, "files", stats.Files, "symlinked", symlinked)
 }
+
+// serveSummaryData carries what the startup summary reports. Zero-valued
+// fields print nothing, so the background parent (which does not know the
+// restore counts) can reuse the same printer as the foreground server.
+type serveSummaryData struct {
+	PID              int
+	RestoredFiles    int
+	RestoredPatterns int
+	AddedFromArgs    int
+	Groups           int
+	Files            int
+	Patterns         int
+	ScannedDirs      int
+	ScannedFiles     int
+	Symlinked        int
+	Excluded         int
+	Watcher          *server.WatcherStatus
+}
+
+// printServeSummary writes the startup summary to stderr. stdout stays
+// machine-readable (URL and deeplinks only).
+func printServeSummary(addr string, d serveSummaryData) {
+	fmt.Fprintf(os.Stderr, "ml: serving at http://%s (pid %d)\n", addr, d.PID)
+	if d.RestoredFiles > 0 || d.RestoredPatterns > 0 {
+		line := fmt.Sprintf("ml: restored %d file(s) and %d pattern(s) from the previous session", d.RestoredFiles, d.RestoredPatterns)
+		if d.AddedFromArgs > 0 {
+			line += fmt.Sprintf("; %d file(s) added from arguments", d.AddedFromArgs)
+		}
+		fmt.Fprintln(os.Stderr, line)
+	}
+	if d.Groups > 0 || d.Files > 0 || d.Patterns > 0 {
+		fmt.Fprintf(os.Stderr, "ml: %d group(s), %d file(s), %d pattern(s)", d.Groups, d.Files, d.Patterns)
+		if d.Watcher != nil && d.Watcher.Status != "" {
+			fmt.Fprintf(os.Stderr, "; watcher: %d root, %d dir, %d file", d.Watcher.Roots, d.Watcher.DirWatches, d.Watcher.FileWatches)
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+	if d.ScannedDirs > 0 || d.ScannedFiles > 0 {
+		line := fmt.Sprintf("ml: scanned %d dir(s) / %d file(s)", d.ScannedDirs, d.ScannedFiles)
+		if d.Symlinked > 0 {
+			line += fmt.Sprintf(" — %d reached through symlinks", d.Symlinked)
+		}
+		fmt.Fprintln(os.Stderr, line)
+	}
+	if d.Excluded > 0 {
+		fmt.Fprintf(os.Stderr, "ml: %d file(s) excluded by .mlignore/--exclude\n", d.Excluded)
+	}
+	if d.Watcher != nil && d.Watcher.Status == "degraded" {
+		msg := fmt.Sprintf("ml: watcher degraded: %d registration(s) failed", d.Watcher.Failed)
+		if d.Watcher.LastError != "" {
+			msg += " (" + d.Watcher.LastError + ")"
+		}
+		msg += "; retrying"
+		fmt.Fprintln(os.Stderr, msg)
+	}
+}
+
+type probeResult struct {
+	client  *http.Client
+	groups  []string
+	app     string
+	version string
+}
+
+// errForeignServer marks a probe that reached a healthy server which
+// identified itself as another application. Callers surface it instead of
+// falling through to starting (or acting on) the wrong server.
+var errForeignServer = errors.New("foreign server on port")
 
 // probeServer checks that a ml server is running on addr by calling
 // GET /_/api/status and validating the response contains a version field.
+// Servers reporting an app identity other than ml are rejected; servers
+// without one (ml ≤ 0.1.0, or a compatible program) are accepted as legacy.
 func probeServer(addr string, timeout ...time.Duration) (*probeResult, error) {
 	t := probeTimeoutDefault
 	if len(timeout) > 0 {
@@ -1169,6 +1381,7 @@ func probeServer(addr string, timeout ...time.Duration) (*probeResult, error) {
 
 	var status struct {
 		Version string `json:"version"`
+		App     string `json:"app"`
 		PID     int    `json:"pid"`
 		Groups  []struct {
 			Name string `json:"name"`
@@ -1177,12 +1390,46 @@ func probeServer(addr string, timeout ...time.Duration) (*probeResult, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil || status.Version == "" {
 		return nil, fmt.Errorf("server on %s is not a ml instance", addr)
 	}
+	if status.App != "" && status.App != server.AppName {
+		return nil, fmt.Errorf("%w %s: server is a %s instance (version %s), not ml; use --port to target a different port", errForeignServer, addr, status.App, status.Version)
+	}
 
 	groups := make([]string, len(status.Groups))
 	for i, g := range status.Groups {
 		groups[i] = g.Name
 	}
-	return &probeResult{client: client, groups: groups}, nil
+	return &probeResult{client: client, groups: groups, app: status.App, version: status.Version}, nil
+}
+
+// noteLegacyServer prints a one-time warning when the server we are about to
+// attach to did not report an app identity. ml ≥ 0.2.0 always sends it, so
+// the server is either an older ml or a program with a compatible status API.
+// A version at or above 1.0.0 cannot be an ml release (ml starts at 0.1.0)
+// and is called out as likely upstream mo.
+func noteLegacyServer(addr string, res *probeResult) {
+	if res.app != "" {
+		return
+	}
+	if major, ok := majorVersion(res.version); ok && major >= 1 {
+		fmt.Fprintf(os.Stderr, "ml: warning: server on http://%s did not identify itself; version %s is not an ml release and may be an upstream mo instance\n", addr, res.version)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "ml: note: server on http://%s did not identify itself (ml ≤ 0.1.0 or a compatible program)\n", addr)
+}
+
+// majorVersion returns the leading major component of a semver-ish version
+// string ("1.6.8" → 1, true).
+func majorVersion(v string) (int, bool) {
+	v = strings.TrimPrefix(v, "v")
+	major, _, ok := strings.Cut(v, ".")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(major)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // waitForServerDownTimeout is the maximum time to wait for a server to stop.
@@ -1245,6 +1492,169 @@ func doRestart(addr string) error {
 	slog.Info("restart request sent", "addr", addr)
 	fmt.Fprintf(os.Stderr, "ml: restart request sent to http://%s\n", addr)
 	return nil
+}
+
+// doReload re-reads the discovery rules (.mlignore lines and --exclude
+// values) for patterns registered from the current directory and pushes them
+// to the running server, which drops entries the new rules reject and picks
+// up files the new rules admit. Patterns registered from another directory
+// are skipped with a hint.
+func doReload(addr string, excludeChanged, includeHiddenChanged bool) error {
+	result, err := probeServer(addr)
+	if err != nil {
+		if errors.Is(err, errForeignServer) {
+			return err
+		}
+		return fmt.Errorf("%w (nothing to reload)", err)
+	}
+
+	resp, err := result.client.Get(fmt.Sprintf("http://%s/_/api/status", addr))
+	if err != nil {
+		return fmt.Errorf("failed to query server state: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return fmt.Errorf("unexpected response from server: %s", resp.Status)
+	}
+	var status statusResponse
+	err = json.NewDecoder(resp.Body).Decode(&status)
+	resp.Body.Close()
+	if err != nil {
+		return fmt.Errorf("failed to decode server state: %w", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	cwdSlash := filepath.ToSlash(cwd)
+
+	var filters []server.PatternFilterData
+	otherBases := []string{}
+	legacyCount := 0
+	for _, g := range status.Groups {
+		for _, pf := range g.PatternFilters {
+			if pf.Rules.Base != cwdSlash && pf.Rules.Base != "" {
+				if !slices.Contains(otherBases, pf.Rules.Base) {
+					otherBases = append(otherBases, pf.Rules.Base)
+				}
+				continue
+			}
+			rules, ok := reloadRulesFor(pf.Rules, excludeChanged, includeHiddenChanged)
+			if !ok {
+				legacyCount++
+				continue
+			}
+			filters = append(filters, server.PatternFilterData{
+				Pattern: pf.Pattern,
+				Group:   pf.Group,
+				Rules:   rules,
+			})
+		}
+	}
+	if len(otherBases) > 0 {
+		fmt.Fprintf(os.Stderr, "ml: note: %d pattern(s) registered from another directory were not reloaded; run ml --reload from %s\n", len(otherBases), otherBases[0])
+	}
+	if legacyCount > 0 {
+		fmt.Fprintf(os.Stderr, "ml: note: %d pattern(s) were registered by an older ml and cannot be reloaded; re-register them to apply the new rules\n", legacyCount)
+	}
+	if len(filters) == 0 {
+		fmt.Fprintf(os.Stderr, "ml: no reloadable pattern registered from %s\n", cwd)
+		return nil
+	}
+
+	body, err := json.Marshal(server.ReloadRequest{Filters: filters})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	resp, err = result.client.Post(fmt.Sprintf("http://%s/_/api/reload", addr), "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to send reload request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected response from server: %s", resp.Status)
+	}
+	var out server.ReloadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("failed to decode reload response: %w", err)
+	}
+
+	if jsonOutput {
+		writeJSON(out)
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "ml: reloaded %d pattern(s): added %d, removed %d, unchanged %d (%d excluded)\n",
+		out.Patterns, out.Added, out.Removed, out.Unchanged, out.Excluded)
+	for i, p := range out.RemovedPaths {
+		if i >= 5 {
+			fmt.Fprintf(os.Stderr, "  … and %d more removed file(s) — use --json to list every path\n", len(out.RemovedPaths)-i)
+			break
+		}
+		fmt.Fprintf(os.Stderr, "  removed %s\n", p)
+	}
+	return nil
+}
+
+// reloadRulesFor resolves the fresh rules for one pattern from the current
+// working directory and command line: the ignore file is re-read, and
+// --exclude/--include-hidden replace the stored values only when they were
+// given on this invocation — otherwise the pattern keeps what it was
+// registered with, which is exactly what the split metadata fields record.
+// It reports false for patterns stored by ml ≤ 0.1.0, whose file lines and
+// flag values cannot be told apart, leaving their rules untouched.
+func reloadRulesFor(old ignore.Rules, excludeChanged, includeHiddenChanged bool) (ignore.Rules, bool) {
+	if old.IgnoreFile == "" && old.FlagExcludes == nil {
+		return ignore.Rules{}, false
+	}
+	newRules := ignore.Rules{
+		Base:         old.Base,
+		IgnoreFile:   old.IgnoreFile,
+		FlagExcludes: old.FlagExcludes,
+	}
+	// A pattern registered with --ignore-file '' keeps the ignore file
+	// disabled; otherwise the file is re-read from the working directory.
+	// A file that has since disappeared simply contributes no lines.
+	if old.IgnoreFile != "" {
+		lines, err := ignore.ReadLines(filepath.Join(cwdForRules(old), old.IgnoreFile))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "ml: warning: cannot read %s: %v\n", old.IgnoreFile, err)
+		}
+		for _, line := range lines {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			if err := ignore.ValidateLine(line); err != nil {
+				fmt.Fprintf(os.Stderr, "ml: warning: ignoring invalid line in %s: %v\n", old.IgnoreFile, err)
+				continue
+			}
+			newRules.Excludes = append(newRules.Excludes, line)
+		}
+	}
+	if excludeChanged {
+		newRules.FlagExcludes = slices.Clone(excludes)
+	}
+	newRules.Excludes = append(newRules.Excludes, newRules.FlagExcludes...)
+	if includeHiddenChanged {
+		newRules.IncludeHidden = includeHidden
+	} else {
+		newRules.IncludeHidden = old.IncludeHidden
+	}
+	return newRules, true
+}
+
+// cwdForRules returns the directory the ignore file is re-read from: the
+// pattern's own base when it has one, the current directory otherwise.
+func cwdForRules(old ignore.Rules) string {
+	if old.Base != "" {
+		return filepath.FromSlash(old.Base)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
 }
 
 func doUnwatch(addr string, patterns []string, groupName string) error {
@@ -1373,10 +1783,12 @@ type statusGroupEntry struct {
 }
 
 type statusResponse struct {
-	Version  string             `json:"version"`
-	Revision string             `json:"revision"`
-	PID      int                `json:"pid"`
-	Groups   []statusGroupEntry `json:"groups"`
+	Version  string               `json:"version"`
+	Revision string               `json:"revision"`
+	App      string               `json:"app"`
+	PID      int                  `json:"pid"`
+	Groups   []statusGroupEntry   `json:"groups"`
+	Watcher  server.WatcherStatus `json:"watcher"`
 }
 
 func doStatus() error {
@@ -1399,13 +1811,16 @@ func doStatus() error {
 		resp, err := client.Get(fmt.Sprintf("http://%s/_/api/status", addr))
 		if err != nil {
 			found = true
+			// discoverPorts derives the list from log files, so a port that
+			// does not answer has a leftover log of a server that is gone.
 			if jsonOutput {
 				jsonEntries = append(jsonEntries, jsonStatusEntry{
 					URL:    fmt.Sprintf("http://%s", addr),
 					Status: "stopped",
+					Stale:  true,
 				})
 			} else {
-				fmt.Fprintf(os.Stdout, "http://%s (stopped)\n", addr)
+				fmt.Fprintf(os.Stdout, "http://%s (stale: no server; log file left over — run ml --prune)\n", addr)
 				if i < len(ports)-1 {
 					fmt.Fprintln(os.Stdout)
 				}
@@ -1421,6 +1836,12 @@ func doStatus() error {
 		resp.Body.Close()
 		found = true
 
+		// The port answers but is not ml (ml reports app="ml" since 0.2.0).
+		// Without an app field it is either an older ml or a program with a
+		// compatible status API — report it either way.
+		foreign := status.App != "" && status.App != server.AppName
+		legacy := status.App == ""
+
 		if jsonOutput {
 			entry := jsonStatusEntry{
 				URL:      fmt.Sprintf("http://%s", addr),
@@ -1428,6 +1849,12 @@ func doStatus() error {
 				PID:      status.PID,
 				Version:  status.Version,
 				Revision: status.Revision,
+				App:      status.App,
+				Legacy:   legacy,
+			}
+			if status.Watcher.Status != "" {
+				watcher := status.Watcher
+				entry.Watcher = &watcher
 			}
 			for _, g := range status.Groups {
 				entry.Groups = append(entry.Groups, jsonStatusGroupEntry{
@@ -1438,12 +1865,21 @@ func doStatus() error {
 				})
 			}
 			jsonEntries = append(jsonEntries, entry)
+		} else if foreign {
+			fmt.Fprintf(os.Stdout, "http://%s (not ml: app=%s version=%s — use --port)\n", addr, status.App, status.Version)
+			if i < len(ports)-1 {
+				fmt.Fprintln(os.Stdout)
+			}
 		} else {
 			ver := status.Version
 			if status.Revision != "" {
 				ver += " " + status.Revision
 			}
-			fmt.Fprintf(os.Stdout, "http://%s (pid %d, %s)\n", addr, status.PID, ver)
+			fmt.Fprintf(os.Stdout, "http://%s (pid %d, %s)", addr, status.PID, ver)
+			if legacy {
+				fmt.Fprint(os.Stdout, " (no app field; ml <=0.1.0 or upstream mo)")
+			}
+			fmt.Fprintln(os.Stdout)
 			for _, g := range status.Groups {
 				fmt.Fprintf(os.Stdout, "  %s: %d file(s)\n", g.Name, len(g.Files))
 				if len(g.Patterns) > 0 {
@@ -1463,6 +1899,7 @@ func doStatus() error {
 					fmt.Fprintf(os.Stdout, "    excluding: %s\n", detail)
 				}
 			}
+			printWatcherLine(&status.Watcher)
 			if i < len(ports)-1 {
 				fmt.Fprintln(os.Stdout)
 			}
@@ -1510,7 +1947,136 @@ func discoverPorts() []int {
 	return ports
 }
 
-func startServer(ctx context.Context, addr string, filesByGroup map[string][]string, specsByGroup map[string][]patternSpec, uploadedFiles []server.UploadedFileData) error {
+// printWatcherLine renders the watcher health of a running server under the
+// group listing. Servers older than the watcher API report nothing.
+func printWatcherLine(w *server.WatcherStatus) {
+	if w == nil || w.Status == "" {
+		return
+	}
+	if w.Status != "degraded" {
+		fmt.Fprintf(os.Stdout, "    watcher: %s — %d root, %d dir, %d file\n", w.Status, w.Roots, w.DirWatches, w.FileWatches)
+		return
+	}
+	line := fmt.Sprintf("    watcher: degraded — %d failed registration(s)", w.Failed)
+	if w.PendingRetries > 0 {
+		line += fmt.Sprintf(", %d retry(s) pending", w.PendingRetries)
+	}
+	if w.LastError != "" {
+		line += " (last: " + w.LastError
+		if w.LastErrorPath != "" {
+			line += " at " + w.LastErrorPath
+		}
+		line += ")"
+	}
+	fmt.Fprintln(os.Stdout, line)
+}
+
+// jsonPruneResult is the --json shape of ml --prune.
+type jsonPruneResult struct {
+	// Logs lists the removed log file names (rotations included).
+	Logs []string `json:"logs"`
+	// Backups lists the ports whose saved sessions were removed.
+	Backups []int `json:"backups"`
+	// Kept lists the ports of servers still running.
+	Kept []int `json:"kept"`
+}
+
+// doPrune removes log files left behind by servers that no longer answer.
+// Saved sessions of pruned ports are reported by default and only removed
+// with --prune-backups, after the same confirmation --clear uses.
+func doPrune() error {
+	dir, err := logfile.Dir()
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintln(os.Stderr, "ml: nothing to prune")
+			return nil
+		}
+		return err
+	}
+
+	// Group every log file (rotations included) by port.
+	filesByPort := map[int][]string{}
+	for _, e := range entries {
+		name := e.Name()
+		idx := strings.Index(name, ".log")
+		if !strings.HasPrefix(name, "ml-") || idx < 0 {
+			continue
+		}
+		p, err := strconv.Atoi(name[len("ml-"):idx])
+		if err != nil {
+			continue
+		}
+		filesByPort[p] = append(filesByPort[p], name)
+	}
+	ports := make([]int, 0, len(filesByPort))
+	for p := range filesByPort {
+		ports = append(ports, p)
+	}
+	sort.Ints(ports)
+
+	result := jsonPruneResult{Logs: []string{}, Backups: []int{}, Kept: []int{}}
+	prunedFiles, keptServers := 0, 0
+	for _, p := range ports {
+		addr := fmt.Sprintf("localhost:%d", p)
+		_, err := probeServer(addr, probeTimeoutFast)
+		running := err == nil
+		if running {
+			keptServers++
+			result.Kept = append(result.Kept, p)
+			if !jsonOutput {
+				fmt.Fprintf(os.Stderr, "ml: kept logs of running server on %s\n", addr)
+			}
+			continue
+		}
+		// A foreign server occupying the port does not use ml's log file,
+		// so the log is stale either way.
+		for _, name := range filesByPort[p] {
+			if rmErr := os.Remove(filepath.Join(dir, name)); rmErr != nil {
+				slog.Warn("failed to remove stale log file", "file", name, "error", rmErr)
+				continue
+			}
+			prunedFiles++
+			result.Logs = append(result.Logs, name)
+		}
+		if backup.Exists(p) {
+			if !pruneBackups {
+				fmt.Fprintf(os.Stderr, "ml: kept saved session for port %d (use --prune-backups to remove)\n", p)
+			} else if confirmRemove(fmt.Sprintf("remove saved session for port %d", p)) {
+				if rmErr := backup.Remove(p); rmErr != nil {
+					slog.Warn("failed to remove saved session", "port", p, "error", rmErr)
+				} else {
+					result.Backups = append(result.Backups, p)
+				}
+			}
+		}
+	}
+
+	if jsonOutput {
+		writeJSON(result)
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "ml: pruned %d stale log file(s); kept %d running server(s)\n", prunedFiles, keptServers)
+	return nil
+}
+
+// confirmRemove asks the user a yes/no question on the terminal, sharing the
+// wording of the --clear confirmation.
+func confirmRemove(action string) bool {
+	fmt.Fprintf(os.Stderr, "ml: %s? [Y/n] ", action)
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		fmt.Fprintln(os.Stderr, "ml: canceled")
+		return false
+	}
+	ans := strings.TrimSpace(scanner.Text())
+	return ans == "" || strings.EqualFold(ans, "y") || strings.EqualFold(ans, "yes")
+}
+
+func startServer(ctx context.Context, addr string, filesByGroup map[string][]string, specsByGroup map[string][]patternSpec, uploadedFiles []server.UploadedFileData, summary serveSummaryData) error {
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -1538,6 +2104,34 @@ func startServer(ctx context.Context, addr string, filesByGroup map[string][]str
 
 	var deeplinks []deeplinkEntry
 	var totalFiles, skippedFiles int
+	// Patterns go first: a large restored session is re-added as plain files,
+	// and if the pattern's root watch does not exist yet every one of those
+	// files registers a physical watch — a session big enough exhausts the OS
+	// watch limit partway through, and the root registration afterwards fails
+	// too. With the root in place first, AddFile dedup keeps the expansion's
+	// entries and the per-file adds below skip physical registration.
+	var patternsAdded int
+	for group, specs := range specsByGroup {
+		for _, spec := range specs {
+			entries, stats, err := state.AddPatternWithRules(spec.Pattern, group, spec.Rules)
+			if err != nil {
+				slog.Warn("failed to add pattern", "pattern", spec.Pattern, "error", err)
+				continue
+			}
+			patternsAdded++
+			summary.ScannedDirs += stats.Dirs
+			summary.ScannedFiles += stats.Files
+			summary.Symlinked += stats.SymlinkedDirs + stats.SymlinkedFiles
+			summary.Excluded += stats.Excluded
+			warnLargePattern(spec.Pattern, stats)
+			for _, entry := range entries {
+				deeplinks = append(deeplinks, deeplinkEntry{
+					URL:  buildDeeplink(addr, group, entry.ID),
+					Path: entry.Path,
+				})
+			}
+		}
+	}
 	for group, files := range filesByGroup {
 		for _, f := range files {
 			totalFiles++
@@ -1551,23 +2145,6 @@ func startServer(ctx context.Context, addr string, filesByGroup map[string][]str
 				URL:  buildDeeplink(addr, group, entry.ID),
 				Path: entry.Path,
 			})
-		}
-	}
-	var patternsAdded int
-	for group, specs := range specsByGroup {
-		for _, spec := range specs {
-			entries, _, err := state.AddPatternWithRules(spec.Pattern, group, spec.Rules)
-			if err != nil {
-				slog.Warn("failed to add pattern", "pattern", spec.Pattern, "error", err)
-				continue
-			}
-			patternsAdded++
-			for _, entry := range entries {
-				deeplinks = append(deeplinks, deeplinkEntry{
-					URL:  buildDeeplink(addr, group, entry.ID),
-					Path: entry.Path,
-				})
-			}
 		}
 	}
 
@@ -1596,6 +2173,16 @@ func startServer(ctx context.Context, addr string, filesByGroup map[string][]str
 	}
 
 	emitServeOutput(addr, deeplinks, true)
+	if summary.PID == 0 {
+		summary.PID = os.Getpid()
+	}
+	summary.Groups = len(state.Groups())
+	summary.Files = state.FileCount()
+	summary.Patterns = len(state.Patterns())
+	if st := state.WatcherStatus(); st.Status != "" {
+		summary.Watcher = &st
+	}
+	printServeSummary(addr, summary)
 
 	if err := donegroup.Cleanup(ctx, func() error {
 		state.CloseAllSubscribers()
@@ -1660,7 +2247,7 @@ func spawnNewProcess(addr string, restoreFile string) (*os.Process, error) {
 	return cmd.Process, nil
 }
 
-func startBackground(addr string, filesByGroup map[string][]string, specsByGroup map[string][]patternSpec, uploadedFiles []server.UploadedFileData) error {
+func startBackground(addr string, filesByGroup map[string][]string, specsByGroup map[string][]patternSpec, uploadedFiles []server.UploadedFileData, summary serveSummaryData) error {
 	patternsByGroup := make(map[string][]string, len(specsByGroup))
 	var patternFilters []server.PatternFilterData
 	for group, specs := range specsByGroup {
@@ -1726,7 +2313,19 @@ func startBackground(addr string, filesByGroup map[string][]string, specsByGroup
 		}
 	}
 	emitServeOutput(addr, deeplinks, true)
-	fmt.Fprintf(os.Stderr, "ml: serving at http://%s (pid %d)\n", addr, pid)
+	if status != nil {
+		summary.PID = pid
+		summary.Groups = len(status.Groups)
+		for _, g := range status.Groups {
+			summary.Files += len(g.Files)
+			summary.Patterns += len(g.Patterns)
+		}
+		if status.Watcher.Status != "" {
+			watcher := status.Watcher
+			summary.Watcher = &watcher
+		}
+	}
+	printServeSummary(addr, summary)
 
 	openBrowser(addr)
 

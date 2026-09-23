@@ -21,12 +21,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bmatcuk/doublestar/v4"
-	"github.com/fswatcher/fswatcher"
-	"github.com/k1LoW/donegroup"
 	"github.com/Aliancn/mdlive/internal/ignore"
 	"github.com/Aliancn/mdlive/internal/static"
 	"github.com/Aliancn/mdlive/version"
+	"github.com/bmatcuk/doublestar/v4"
+	"github.com/fswatcher/fswatcher"
+	"github.com/k1LoW/donegroup"
 	"golang.org/x/text/collate"
 	"golang.org/x/text/language"
 )
@@ -197,7 +197,13 @@ type sseEvent struct {
 const (
 	eventUpdate      = "update"
 	eventFileChanged = "file-changed"
+	eventWatcher     = "watcher"
 )
+
+// AppName identifies this application in API responses, so clients can tell
+// an ml server from a foreign instance that happens to serve a compatible
+// status API on the same port.
+const AppName = "ml"
 
 // watchOps is the set of fswatcher ops the watch loop reacts to.
 // Chmod is intentionally excluded because the loop ignores it.
@@ -259,6 +265,37 @@ type State struct {
 	watchedFiles     map[string]int
 	fileWatchTargets map[string]int
 
+	// roots and rootTargets mirror watchedDirs and watchTargets for recursive
+	// root watches (one AddRecursive per pattern base, instead of one watch
+	// per directory and file). roots counts the base as spelled, rootTargets
+	// its canonical form. retainedRoots holds canonical targets whose pattern
+	// went away but whose stream must stay alive because tracked files below
+	// them carry no watch of their own. dirAliases refcounts the symlinked
+	// directories whose path aliases keep event translation working under the
+	// root model.
+	roots         map[string]int
+	rootTargets   map[string]int
+	retainedRoots map[string]bool
+	dirAliases    map[string]int
+
+	// rootWatch snapshots watchRootsEnabled at construction, so the watch
+	// loop reads an immutable value instead of racing with tests that flip
+	// the global.
+	rootWatch bool
+
+	// health holds the watcher's self-reported bookkeeping: failed
+	// registrations, pending retries, and the circuit breaker. Guarded by
+	// s.mu; see watch.go. healthWake wakes the retry loop when a retry
+	// becomes due earlier than the one it is currently waiting for.
+	health     watchHealth
+	healthWake chan struct{}
+
+	// healthMu guards lastHealthStatus, the dedup key for watcher SSE
+	// events. It is separate from s.mu because maybeEmitHealth runs on a
+	// timer and must not be called while s.mu is held.
+	healthMu         sync.Mutex
+	lastHealthStatus string
+
 	fileChangeDebounce time.Duration
 	fileChangeTimers   map[string]*time.Timer
 
@@ -287,6 +324,12 @@ func NewState(ctx context.Context) *State {
 		aliasReverse:       make(map[string]string),
 		watchedFiles:       make(map[string]int),
 		fileWatchTargets:   make(map[string]int),
+		roots:              make(map[string]int),
+		rootTargets:        make(map[string]int),
+		retainedRoots:      make(map[string]bool),
+		dirAliases:         make(map[string]int),
+		rootWatch:          watchRootsEnabled,
+		healthWake:         make(chan struct{}, 1),
 		fileChangeDebounce: defaultFileChangeDebounce,
 		fileChangeTimers:   make(map[string]*time.Timer),
 	}
@@ -294,6 +337,10 @@ func NewState(ctx context.Context) *State {
 	if w != nil {
 		donegroup.Go(ctx, func() error {
 			s.watchLoop()
+			return nil
+		})
+		donegroup.Go(ctx, func() error {
+			s.watchRetryLoop(ctx)
 			return nil
 		})
 	}
@@ -704,32 +751,46 @@ func (s *State) AddPattern(absPattern, groupName string) ([]*FileEntry, error) {
 	return entries, err
 }
 
+// PatternStats summarizes one pattern registration. Matched counts the files
+// actually added for the pattern and Excluded the matches the filter dropped;
+// Dirs, Files, SymlinkedDirs, and SymlinkedFiles carry the scan statistics of
+// the expansion walk (zero for non-recursive patterns, whose expansion does
+// not follow directory symlinks).
+type PatternStats struct {
+	Matched        int `json:"matched"`
+	Excluded       int `json:"excluded,omitempty"`
+	Dirs           int `json:"dirs,omitempty"`
+	Files          int `json:"files,omitempty"`
+	SymlinkedDirs  int `json:"symlinkedDirs,omitempty"`
+	SymlinkedFiles int `json:"symlinkedFiles,omitempty"`
+}
+
 // AddPatternWithRules registers a glob pattern for automatic file discovery,
 // with the given rules filtering both the initial expansion and every later
 // match, and pruning directory watches the rules exclude. It performs an
 // initial expansion to add existing matches and starts watching the base
-// directory for new files. The second return value counts matches the filter
+// directory for new files. The returned stats count matches the filter
 // dropped, so callers can tell "nothing matched" from "everything was
 // excluded". Re-registering a pattern with different rules replaces the old
 // rules and re-expands; the old directory watches are released first so
 // refcounts stay symmetric.
-func (s *State) AddPatternWithRules(absPattern, groupName string, rules ignore.Rules) ([]*FileEntry, int, error) {
+func (s *State) AddPatternWithRules(absPattern, groupName string, rules ignore.Rules) ([]*FileEntry, PatternStats, error) {
 	filter, err := rules.Filter()
 	if err != nil {
-		return nil, 0, fmt.Errorf("invalid filter: %w", err)
+		return nil, PatternStats{}, fmt.Errorf("invalid filter: %w", err)
 	}
 
 	// Use forward slashes for doublestar
 	dsPattern := filepath.ToSlash(absPattern)
-	base, relPat := doublestar.SplitPattern(dsPattern)
+	base, _ := doublestar.SplitPattern(dsPattern)
 	base = filepath.FromSlash(base)
 
 	info, err := os.Stat(base)
 	if err != nil {
-		return nil, 0, fmt.Errorf("base directory %q does not exist: %w", base, err)
+		return nil, PatternStats{}, fmt.Errorf("base directory %q does not exist: %w", base, err)
 	}
 	if !info.IsDir() {
-		return nil, 0, fmt.Errorf("base path %q is not a directory", base)
+		return nil, PatternStats{}, fmt.Errorf("base path %q is not a directory", base)
 	}
 
 	var replaced *GlobPattern
@@ -767,62 +828,36 @@ func (s *State) AddPatternWithRules(absPattern, groupName string, rules ignore.R
 		return gp, createdGroup, true
 	}()
 	if !added {
-		return nil, 0, nil
+		return nil, PatternStats{}, nil
 	}
 	if replaced != nil {
-		s.walkDirsForPattern(replaced, s.removeDirWatch)
+		s.releasePatternWatches(replaced)
 	}
 
-	// Initial expansion
-	var matches []string
-	if gp.IsRecursive() {
-		var matchErr error
-		_, err = walkSymlinkTree(base, nil, func(path string) {
-			if matchErr != nil {
-				return
-			}
-			matched, err := doublestar.Match(dsPattern, filepath.ToSlash(path))
-			if err != nil {
-				matchErr = err
-				return
-			}
-			if matched {
-				// Alias paths are kept as distinct matches rather than collapsed
-				// onto their canonical form. FileID is derived from the path, so
-				// collapsing would make the surviving ID depend on ReadDir order
-				// and break deep links and session restore, and preferring the
-				// canonical form would move an entry outside the watched tree.
-				rel, err := filepath.Rel(base, path)
-				if err == nil {
-					matches = append(matches, rel)
-				}
-			}
-		}, gp.pruneFunc())
-		if err == nil {
-			err = matchErr
-		}
-	} else {
-		matches, err = doublestar.Glob(os.DirFS(base), relPat, doublestar.WithFilesOnly())
-	}
+	// Register the watches before the expansion: files added below then see a
+	// covering root (or directory watch) in fileCovered and skip their
+	// per-file watch, instead of registering one each.
+	s.registerPatternWatches(gp)
+
+	matches, stats, err := expandPatternMatches(gp)
 	if err != nil {
 		s.rollbackPattern(gp, createdGroup)
+		s.releasePatternWatches(gp)
 		if replaced != nil {
 			// The old pattern lost its watches above; restore it intact.
 			s.mu.Lock()
 			s.patterns = append(s.patterns, replaced)
 			s.mu.Unlock()
-			s.watchDirsForPattern(replaced)
+			s.registerPatternWatches(replaced)
 		}
-		return nil, 0, fmt.Errorf("glob expansion failed: %w", err)
+		return nil, PatternStats{}, fmt.Errorf("glob expansion failed: %w", err)
 	}
-	collate.New(language.Und, collate.Numeric).SortStrings(matches)
 
 	var entries []*FileEntry
-	excluded := 0
 	for _, m := range matches {
 		abs := filepath.Join(base, m)
 		if !gp.pattern.AdmitsFile(abs) {
-			excluded++
+			stats.Excluded++
 			continue
 		}
 		entry, err := s.AddFile(abs, groupName)
@@ -833,9 +868,68 @@ func (s *State) AddPatternWithRules(absPattern, groupName string, rules ignore.R
 		entries = append(entries, entry)
 	}
 
-	s.watchDirsForPattern(gp)
+	stats.Matched = len(entries)
+	return entries, stats, nil
+}
 
-	return entries, excluded, nil
+// expandPatternMatches returns the pattern's current matches relative to its
+// base, sorted, plus the walk statistics behind them. Recursive patterns walk
+// the base directory, following directory symlinks and pruning subtrees the
+// filter excludes; non-recursive patterns use doublestar.Glob, which does not
+// follow directory symlinks and therefore reports no symlink statistics.
+func expandPatternMatches(gp *GlobPattern) ([]string, PatternStats, error) {
+	var stats PatternStats
+	var matches []string
+	var err error
+	if gp.IsRecursive() {
+		var walk walkStats
+		var matchErr error
+		walk, err = walkSymlinkTree(gp.BaseDir, nil, func(path string) {
+			if matchErr != nil {
+				return
+			}
+			matched, err := doublestar.Match(gp.PatternSlash, filepath.ToSlash(path))
+			if err != nil {
+				matchErr = err
+				return
+			}
+			if matched {
+				// Alias paths are kept as distinct matches rather than collapsed
+				// onto their canonical form. FileID is derived from the path, so
+				// collapsing would make the surviving ID depend on ReadDir order
+				// and break deep links and session restore, and preferring the
+				// canonical form would move an entry outside the watched tree.
+				rel, err := filepath.Rel(gp.BaseDir, path)
+				if err == nil {
+					matches = append(matches, rel)
+				}
+			}
+		}, gp.pruneFunc())
+		if err == nil {
+			err = matchErr
+		}
+		stats.Dirs, stats.Files = walk.Dirs, walk.Files
+		stats.SymlinkedDirs, stats.SymlinkedFiles = walk.SymlinkedDirs, walk.SymlinkedFiles
+	} else {
+		_, relPat := doublestar.SplitPattern(gp.PatternSlash)
+		matches, err = doublestar.Glob(os.DirFS(gp.BaseDir), relPat, doublestar.WithFilesOnly())
+	}
+	if err != nil {
+		return nil, stats, err
+	}
+	collate.New(language.Und, collate.Numeric).SortStrings(matches)
+	return matches, stats, nil
+}
+
+// FileCount returns the total number of file entries across all groups.
+func (s *State) FileCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, g := range s.groups {
+		n += len(g.Files)
+	}
+	return n
 }
 
 // Patterns returns a copy of all registered glob patterns.
@@ -895,7 +989,7 @@ func (s *State) RemovePattern(absPattern, groupName string) bool {
 		return false
 	}
 
-	s.walkDirsForPattern(removed, s.removeDirWatch)
+	s.releasePatternWatches(removed)
 
 	slog.Info("pattern removed", "pattern", absPattern, "group", groupName)
 	s.mu.Lock()
@@ -1074,7 +1168,7 @@ func (s *State) walkDirsForPattern(gp *GlobPattern, fn func(string)) {
 		return
 	}
 
-	unresolved, err := walkSymlinkTree(gp.BaseDir, fn, nil, gp.pruneFunc())
+	stats, err := walkSymlinkTree(gp.BaseDir, fn, nil, gp.pruneFunc())
 	// Entries that could not be classified never reached fn, so hand over the
 	// ones already tracked as watched directories. Without this, unwatch cannot
 	// decrement the refcount of a directory that stopped resolving after its
@@ -1083,8 +1177,8 @@ func (s *State) walkDirsForPattern(gp *GlobPattern, fn func(string)) {
 	// such as dangling file symlinks, which have no refcount to release and
 	// would only produce a failed watch and a misleading warning on the add
 	// path.
-	for _, path := range unresolved {
-		if s.isWatchedDir(path) {
+	for _, path := range stats.Unresolved {
+		if s.isDirectlyWatchedDir(path) {
 			fn(path)
 		}
 	}
@@ -1119,11 +1213,18 @@ func (s *State) removeFileWatch(absPath string) {
 		return
 	}
 	delete(s.fileWatchTargets, target)
+	// The watch is going away deliberately: a pending retry for it must not
+	// resurrect a registration nothing references anymore.
+	s.cancelWatchRetryLocked(watchKindFile, target)
 	if s.watcher != nil {
-		if err := s.watcher.Remove(target); err != nil {
+		// ErrNotAdded is normal here: a covered file was never registered
+		// individually, and a failed registration is retried later.
+		if err := s.watcher.Remove(target); err != nil && !errors.Is(err, fswatcher.ErrNotAdded) {
 			slog.Warn("failed to unwatch file", "path", absPath, "target", target, "error", err)
 		}
 	}
+	// The removal may have been the last tracked file below a retained root.
+	s.sweepRetainedRootsLocked()
 }
 
 func (s *State) removeDirWatch(dir string) {
@@ -1151,8 +1252,11 @@ func (s *State) removeDirWatch(dir string) {
 		return
 	}
 	delete(s.watchTargets, target)
+	s.cancelWatchRetryLocked(watchKindDir, target)
 	if s.watcher != nil {
-		if err := s.watcher.Remove(target); err != nil {
+		// ErrNotAdded is normal: a directory covered by a root was never
+		// registered individually.
+		if err := s.watcher.Remove(target); err != nil && !errors.Is(err, fswatcher.ErrNotAdded) {
 			slog.Warn("failed to remove directory watch", "dir", dir, "target", target, "error", err)
 		}
 	}
@@ -1182,28 +1286,64 @@ func (s *State) watchLoop() {
 					// entry (ErrAlreadyAdded for a still-live watch).
 					if event.Op.Has(fswatcher.Remove) || event.Op.Has(fswatcher.Rename) {
 						time.AfterFunc(100*time.Millisecond, func() {
-							if _, statErr := os.Stat(eventPath); errors.Is(statErr, os.ErrNotExist) {
+							fi, statErr := os.Stat(eventPath)
+							if errors.Is(statErr, os.ErrNotExist) {
 								slog.Info("file deleted, removing from list", "path", eventPath)
 								for _, ref := range refs {
 									s.RemoveFile(ref.ID, ref.Group)
 								}
 								return
 							}
-							if err := s.watcher.Add(eventPath, watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
+							if statErr == nil && fi.IsDir() && s.rootCovers(eventPath) {
+								// The path is now a directory inside a watched
+								// tree (a populated directory was renamed in):
+								// the watch reported only the directory, so
+								// scan what it brought along.
+								s.handleCreateForGlobs(eventPath)
+								return
+							}
+							if s.fileCovered(eventPath) {
+								// The covering watch tracks paths, not inodes:
+								// the replacement file is still watched, and
+								// re-registering it on every atomic save would
+								// pile up duplicate registrations.
+								s.scheduleFileChanged(eventPath)
+								return
+							}
+							// The file still exists here, so its alias
+							// resolution is reliable; the retry bookkeeping
+							// must use the same target removeFileWatch will
+							// cancel with.
+							target := eventPath
+							if canonical := resolvePathAlias(eventPath); canonical != "" {
+								target = canonical
+							}
+							if err := s.watcher.Add(fileWatchPath(target), watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
 								slog.Warn("failed to re-watch file", "path", eventPath, "error", err)
+								s.recordWatchFailure(watchKindFile, target, err)
 								return
 							}
 							slog.Info("re-watching file", "path", eventPath)
+							s.clearWatchFailure(watchKindFile, target)
 							s.scheduleFileChanged(eventPath)
 						})
 					}
 				}
 				if event.Op.Has(fswatcher.Rename) || event.Op.Has(fswatcher.Remove) {
-					if s.isWatchedDir(eventPath) {
+					if s.isDirectlyWatchedDir(eventPath) || s.dirMoveUnderRoot(eventPath, refs) {
 						s.handleDirMove(eventPath)
 					}
+					if s.isRootPath(eventPath) {
+						s.noteRootLoss(eventPath)
+					}
 				}
-				if event.Op.Has(fswatcher.Create) {
+				// FSEvents reports a rename as Rename (no Create), so a
+				// populated directory renamed into a watched tree — or a
+				// directory renamed within it — arrives here without the
+				// Create flag. Scan the path on Rename as well: missing
+				// paths (rename-out) are skipped by the stat inside, and
+				// rename-in brings its pre-existing children along.
+				if event.Op.Has(fswatcher.Create) || event.Op.Has(fswatcher.Rename) {
 					s.handleCreateForGlobs(eventPath)
 				}
 			}
@@ -1212,6 +1352,7 @@ func (s *State) watchLoop() {
 				return
 			}
 			slog.Warn("file watcher error", "error", err)
+			s.recordWatcherWarning(err)
 		}
 	}
 }
@@ -1399,7 +1540,11 @@ func (s *State) findRefsByPathPrefix(dirPath string) []fileRef {
 	return refs
 }
 
-func (s *State) isWatchedDir(path string) bool {
+// isDirectlyWatchedDir reports whether path has a per-directory watch entry.
+// Under the root model directories inside a recursive pattern have no such
+// entry (the root covers them), so this answers "is directly watched", not
+// "is inside the watched set".
+func (s *State) isDirectlyWatchedDir(path string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	_, ok := s.watchedDirs[path]
@@ -1428,10 +1573,6 @@ func (s *State) sendEvent(e sseEvent) {
 	if e.Name == eventUpdate {
 		s.markDirty()
 	}
-}
-
-func (s *State) watchDirsForPattern(gp *GlobPattern) {
-	s.walkDirsForPattern(gp, s.addDirWatch)
 }
 
 // rollbackPattern undoes what AddPattern registers before its initial
@@ -1482,12 +1623,14 @@ func (s *State) addFileWatch(absPath, canonical string) {
 		s.registerPathAlias(absPath, canonical)
 		return
 	}
-	if s.watcher != nil {
-		if err := s.watcher.Add(target, watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
-			delete(s.watchedFiles, absPath)
-			delete(s.fileWatchTargets, target)
+	if s.watcher != nil && !s.fileCoveredLocked(target) {
+		if err := s.watcher.Add(fileWatchPath(target), watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
+			// Keep the counts: a rollback here would desync removeFileWatch's
+			// bookkeeping, and registration failures are reconciled by retry.
 			slog.Warn("failed to watch file", "path", absPath, "target", target, "error", err)
-			return
+			s.recordWatchFailureLocked(watchKindFile, target, err)
+		} else {
+			s.clearWatchFailureLocked(watchKindFile, target)
 		}
 	}
 	s.registerPathAlias(absPath, canonical)
@@ -1518,12 +1661,16 @@ func (s *State) addDirWatch(dir string) {
 		s.registerPathAlias(dir, canonical)
 		return
 	}
-	if s.watcher != nil {
+	// A directory below a live root is already covered by the root's stream;
+	// keep the bookkeeping but skip the second registration.
+	if s.watcher != nil && !s.rootCoversLocked(target) {
 		if err := s.watcher.Add(target, watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
-			delete(s.watchedDirs, dir)
-			delete(s.watchTargets, target)
+			// Keep the counts: a rollback here would desync removeDirWatch's
+			// bookkeeping, and registration failures are reconciled by retry.
 			slog.Warn("failed to watch directory", "path", dir, "target", target, "error", err)
-			return
+			s.recordWatchFailureLocked(watchKindDir, target, err)
+		} else {
+			s.clearWatchFailureLocked(watchKindDir, target)
 		}
 	}
 	s.registerPathAlias(dir, canonical)
@@ -1556,20 +1703,21 @@ func (s *State) handleCreateForGlobs(path string) {
 		}
 		// Prune subtrees no covering pattern admits, so a created .git or
 		// vendor directory is neither scanned nor watched.
-		if _, err := walkSymlinkTree(path, func(dir string) {
+		visitDir := func(dir string) {
 			for range watchCount {
 				s.addDirWatch(dir)
 			}
-		}, func(file string) {
+		}
+		if s.hasRoots() {
+			// A root watch already covers the subtree, so no registration is
+			// needed (or wanted: it would multiply watches). The scan still
+			// has to pick up the files a populated directory brought along,
+			// and keeps path aliases fresh for symlinked directories inside.
+			visitDir = s.retainDirAlias
+		}
+		if _, err := walkSymlinkTree(path, visitDir, func(file string) {
 			s.matchAndAddFile(file, patterns)
-		}, func(dir string) bool {
-			for _, gp := range patterns {
-				if gp.IsRecursive() && pathWithinBase(dir, gp.BaseDir) && gp.pattern.AdmitsDir(dir) {
-					return false
-				}
-			}
-			return true
-		}); err != nil {
+		}, pruneForPatterns(patterns)); err != nil {
 			slog.Warn("failed to scan created directory", "path", path, "error", err)
 		}
 		return
@@ -1583,24 +1731,54 @@ func pathWithinBase(path, base string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// pruneForPatterns returns a prune callback rejecting directories that no
+// covering recursive pattern admits, so subtrees outside every pattern's
+// filter are neither scanned nor watched.
+func pruneForPatterns(patterns []*GlobPattern) func(string) bool {
+	return func(dir string) bool {
+		for _, gp := range patterns {
+			if gp.IsRecursive() && pathWithinBase(dir, gp.BaseDir) && gp.pattern.AdmitsDir(dir) {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+// walkStats summarizes one walkSymlinkTree run. Dirs and Files count the
+// entries the walk actually visited (after pruning), so they measure the
+// scan size a pattern's tree produced; SymlinkedDirs and SymlinkedFiles
+// count how many of those were reached through a symbolic link.
+type walkStats struct {
+	Dirs           int
+	Files          int
+	SymlinkedDirs  int
+	SymlinkedFiles int
+	Unresolved     []string
+}
+
 // walkSymlinkTree walks root, descending through directory symlinks, handing
 // every directory to visitDir and every other entry to visitFile. Paths that
-// could not be classified are returned separately instead of being dropped,
-// because a caller keeping per-directory state still has to reach a directory
-// that vanished between watch setup and teardown. When prune is non-nil it is
-// called with each directory (never the root itself) before descending, and a
-// true result skips the subtree entirely: pruned directories reach neither
-// visitDir, visitFile, nor the unresolved list.
-func walkSymlinkTree(root string, visitDir, visitFile func(string), prune func(string) bool) ([]string, error) {
-	var unresolved []string
+// could not be classified are collected in the returned stats instead of
+// being dropped, because a caller keeping per-directory state still has to
+// reach a directory that vanished between watch setup and teardown. When
+// prune is non-nil it is called with each directory (never the root itself)
+// before descending, and a true result skips the subtree entirely: pruned
+// directories reach neither visitDir, visitFile, nor the unresolved list.
+func walkSymlinkTree(root string, visitDir, visitFile func(string), prune func(string) bool) (walkStats, error) {
+	var stats walkStats
 	var walk func(string, map[string]struct{}) error
 	walk = func(path string, ancestors map[string]struct{}) error {
 		info, err := os.Stat(path)
 		if err != nil {
-			unresolved = append(unresolved, path)
+			stats.Unresolved = append(stats.Unresolved, path)
 			return err
 		}
 		if !info.IsDir() {
+			stats.Files++
+			if link, err := os.Lstat(path); err == nil && link.Mode()&os.ModeSymlink != 0 {
+				stats.SymlinkedFiles++
+			}
 			if visitFile != nil {
 				visitFile(path)
 			}
@@ -1609,11 +1787,15 @@ func walkSymlinkTree(root string, visitDir, visitFile func(string), prune func(s
 		if prune != nil && path != root && prune(path) {
 			return nil
 		}
+		stats.Dirs++
 
 		canonical, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			unresolved = append(unresolved, path)
+			stats.Unresolved = append(stats.Unresolved, path)
 			return err
+		}
+		if canonical != path {
+			stats.SymlinkedDirs++
 		}
 		if _, ok := ancestors[canonical]; ok {
 			return nil
@@ -1643,7 +1825,7 @@ func walkSymlinkTree(root string, visitDir, visitFile func(string), prune func(s
 	}
 
 	err := walk(root, nil)
-	return unresolved, err
+	return stats, err
 }
 
 func (s *State) matchAndAddFile(path string, patterns []*GlobPattern) {
@@ -1695,9 +1877,8 @@ type addPatternRequest struct {
 
 // AddPatternResponse is the JSON response for the add-pattern endpoint.
 type AddPatternResponse struct {
-	Matched  int          `json:"matched"`
-	Excluded int          `json:"excluded,omitempty"`
-	Files    []*FileEntry `json:"files,omitempty"`
+	PatternStats
+	Files []*FileEntry `json:"files,omitempty"`
 }
 
 type fileContentResponse struct {
@@ -1763,6 +1944,8 @@ func NewHandler(state *State) http.Handler {
 	mux.HandleFunc("POST /_/api/groups/{group}/files/open", handleOpenFile(state))
 	mux.HandleFunc("POST /_/api/patterns", handleAddPattern(state))
 	mux.HandleFunc("DELETE /_/api/patterns", handleRemovePattern(state))
+	mux.HandleFunc("POST /_/api/watcher/retry", handleWatcherRetry(state))
+	mux.HandleFunc("POST /_/api/reload", handleReload(state))
 	mux.HandleFunc("POST /_/api/restart", handleRestart(state))
 	mux.HandleFunc("POST /_/api/shutdown", handleShutdown(state))
 	mux.HandleFunc("GET /_/api/status", handleStatus(state))
@@ -2336,14 +2519,14 @@ func handleAddPattern(state *State) http.HandlerFunc {
 			}
 		}
 
-		entries, excluded, err := state.AddPatternWithRules(req.Pattern, group, rules)
+		entries, stats, err := state.AddPatternWithRules(req.Pattern, group, rules)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(AddPatternResponse{Matched: len(entries), Excluded: excluded, Files: entries}); err != nil {
+		if err := json.NewEncoder(w).Encode(AddPatternResponse{PatternStats: stats, Files: entries}); err != nil {
 			slog.Error("failed to encode response", "error", err)
 		}
 	}
@@ -2407,6 +2590,16 @@ type statusGroup struct {
 	PatternFilters []PatternFilterData `json:"patternFilters,omitempty"`
 }
 
+// StatusResponse is the shape of the GET /_/api/status response.
+type StatusResponse struct {
+	Version  string        `json:"version"`
+	Revision string        `json:"revision"`
+	App      string        `json:"app"`
+	PID      int           `json:"pid"`
+	Groups   []statusGroup `json:"groups"`
+	Watcher  WatcherStatus `json:"watcher"`
+}
+
 func handleStatus(state *State) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		groups := state.Groups()
@@ -2419,16 +2612,13 @@ func handleStatus(state *State) http.HandlerFunc {
 			}
 		}
 
-		resp := struct {
-			Version  string        `json:"version"`
-			Revision string        `json:"revision"`
-			PID      int           `json:"pid"`
-			Groups   []statusGroup `json:"groups"`
-		}{
+		resp := StatusResponse{
 			Version:  version.Version,
 			Revision: version.Revision,
+			App:      AppName,
 			PID:      os.Getpid(),
 			Groups:   statusGroups,
+			Watcher:  state.WatcherStatus(),
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -2441,10 +2631,23 @@ func handleVersion() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]string{
+			"app":      AppName,
 			"version":  version.Version,
 			"revision": version.Revision,
 		}); err != nil {
 			slog.Error("failed to encode version response", "error", err)
+		}
+	}
+}
+
+// handleWatcherRetry re-registers every failed watch immediately. It backs the
+// "retry now" affordance for a degraded watcher.
+func handleWatcherRetry(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		status := state.RetryFailedWatches()
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(status); err != nil {
+			slog.Error("failed to encode watcher retry response", "error", err)
 		}
 	}
 }
@@ -2467,6 +2670,14 @@ func handleSSE(state *State) http.HandlerFunc {
 		// Send server identity on connection
 		fmt.Fprintf(w, "event: started\ndata: {\"pid\":%d}\n\n", os.Getpid())
 		flusher.Flush()
+		// Immediately follow with the current watcher health, so a client
+		// that connects while the watcher is degraded sees it at once.
+		if st := state.WatcherStatus(); st.Status != "" {
+			if b, err := json.Marshal(st); err == nil {
+				fmt.Fprintf(w, "event: watcher\ndata: %s\n\n", b)
+				flusher.Flush()
+			}
+		}
 
 		ctx := r.Context()
 		for {

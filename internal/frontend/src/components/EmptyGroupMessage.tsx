@@ -15,7 +15,7 @@ const DEFAULT_PORT = "6275";
 function buildUnwatchCommand(pattern: string, groupName: string, port: string): string {
   const groupFlag = groupName && groupName !== "default" ? ` -t ${shellQuote(groupName)}` : "";
   const portFlag = port && port !== DEFAULT_PORT ? ` -p ${port}` : "";
-  return `mo --unwatch ${shellQuote(pattern)}${groupFlag}${portFlag}`;
+  return `ml --unwatch ${shellQuote(pattern)}${groupFlag}${portFlag}`;
 }
 
 interface CommandRowProps {

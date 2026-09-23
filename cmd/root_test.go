@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1569,7 +1571,7 @@ func TestPostPatterns_SendsFilter(t *testing.T) {
 			t.Errorf("failed to decode body: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(server.AddPatternResponse{Matched: 0}) //nolint:errcheck
+		json.NewEncoder(w).Encode(server.AddPatternResponse{PatternStats: server.PatternStats{Matched: 0}}) //nolint:errcheck
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
@@ -1649,6 +1651,674 @@ func TestRestorePatternSpecs(t *testing.T) {
 		specs := restorePatternSpecs(map[string][]string{"default": {"/x/*.md"}}, nil)
 		if !specs["default"][0].Rules.Empty() {
 			t.Fatalf("legacy pattern should get zero rules: %+v", specs["default"][0])
+		}
+	})
+}
+
+// captureStderr runs fn while capturing what it writes to os.Stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		defer func() {
+			if err := r.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		b, err := io.ReadAll(r)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- string(b)
+	}()
+	fn()
+	os.Stderr = oldStderr
+	w.Close()
+	return <-done
+}
+
+func TestProbeServer_AppField(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   map[string]any
+		wantErr  bool
+		wantNote string // empty: no stderr note expected
+		wantApp  string
+		wantVer  string
+	}{
+		{
+			name:    "ml server passes",
+			status:  map[string]any{"version": "0.2.0", "app": "ml", "pid": 1, "groups": []any{}},
+			wantApp: "ml",
+			wantVer: "0.2.0",
+		},
+		{
+			name:     "legacy server without app passes with note",
+			status:   map[string]any{"version": "0.1.0", "pid": 1, "groups": []any{}},
+			wantApp:  "",
+			wantVer:  "0.1.0",
+			wantNote: "did not identify itself (ml ≤ 0.1.0",
+		},
+		{
+			name:     "legacy server with 1.x version hints at mo",
+			status:   map[string]any{"version": "1.6.8", "pid": 1, "groups": []any{}},
+			wantApp:  "",
+			wantVer:  "1.6.8",
+			wantNote: "may be an upstream mo instance",
+		},
+		{
+			name:    "foreign app is rejected",
+			status:  map[string]any{"version": "1.6.8", "app": "mo", "pid": 1, "groups": []any{}},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/_/api/status" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(tt.status) //nolint:errcheck
+			}))
+			defer ts.Close()
+			addr := strings.TrimPrefix(ts.URL, "http://")
+
+			res, err := probeServer(addr)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("probeServer succeeded, want foreign-server error")
+				}
+				if !errors.Is(err, errForeignServer) {
+					t.Fatalf("error %v does not mark a foreign server", err)
+				}
+				if !strings.Contains(err.Error(), "is a mo instance") || !strings.Contains(err.Error(), "use --port") {
+					t.Fatalf("error %v lacks the identity details", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("probeServer returned error: %v", err)
+			}
+			if res.app != tt.wantApp || res.version != tt.wantVer {
+				t.Fatalf("got app=%q version=%q, want %q/%q", res.app, res.version, tt.wantApp, tt.wantVer)
+			}
+
+			// The legacy note is printed exactly once per attach decision.
+			captured := captureStderr(t, func() {
+				noteLegacyServer(addr, res)
+			})
+			if tt.wantNote == "" && captured != "" {
+				t.Fatalf("unexpected stderr note: %q", captured)
+			}
+			if tt.wantNote != "" && !strings.Contains(captured, tt.wantNote) {
+				t.Fatalf("stderr note %q does not contain %q", captured, tt.wantNote)
+			}
+		})
+	}
+}
+
+func TestReload_RulesResolution(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwdSlash := filepath.ToSlash(cwd)
+	if err := os.WriteFile(filepath.Join(dir, ".mlignore"), []byte("docs/**\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pattern := cwdSlash + "/**/*.md"
+
+	var reloadBodies []map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_/api/status", func(w http.ResponseWriter, _ *http.Request) {
+		status := map[string]any{
+			"version": "0.2.0",
+			"pid":     1,
+			"app":     "ml",
+			"groups": []map[string]any{{
+				"name":  "default",
+				"files": []map[string]any{},
+				"patterns": []string{
+					pattern,              // reloadable
+					"/other/dir/**/*.md", // other base, skipped client-side
+				},
+				"patternFilters": []map[string]any{
+					{
+						"pattern": pattern,
+						"group":   "default",
+						"rules": map[string]any{
+							"base":         cwdSlash,
+							"ignoreFile":   ".mlignore",
+							"flagExcludes": []string{"vendor/**"},
+						},
+					},
+					{
+						"pattern": "/other/dir/**/*.md",
+						"group":   "default",
+						"rules":   map[string]any{"base": "/other/dir", "ignoreFile": ".mlignore", "flagExcludes": []string{}},
+					},
+					{
+						// ml ≤ 0.1.0 shape: no provenance, cannot be reloaded.
+						"pattern": cwdSlash + "/legacy/**/*.md",
+						"group":   "default",
+						"rules":   map[string]any{"base": cwdSlash},
+					},
+				},
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(status) //nolint:errcheck
+	})
+	mux.HandleFunc("POST /_/api/reload", func(w http.ResponseWriter, r *http.Request) {
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("failed to read body: %v", err)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(data, &body); err != nil {
+			t.Errorf("failed to decode body: %v", err)
+		}
+		reloadBodies = append(reloadBodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(server.ReloadResponse{Patterns: 1}) //nolint:errcheck
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	addr := strings.TrimPrefix(ts.URL, "http://")
+
+	t.Run("keeps stored flags, rereads ignore file", func(t *testing.T) {
+		reloadBodies = nil
+		oldExcludes := excludes
+		oldHidden := includeHidden
+		defer func() { excludes, includeHidden = oldExcludes, oldHidden }()
+		excludes = []string{"vendor/**"}
+		includeHidden = false
+
+		if err := doReload(addr, false, false); err != nil {
+			t.Fatal(err)
+		}
+		if len(reloadBodies) != 1 {
+			t.Fatalf("got %d reload requests, want 1", len(reloadBodies))
+		}
+		filters, ok := reloadBodies[0]["filters"].([]any)
+		if !ok || len(filters) != 1 {
+			t.Fatalf("body filters = %v, want exactly the reloadable pattern", reloadBodies[0]["filters"])
+		}
+		filter, ok := filters[0].(map[string]any)
+		if !ok {
+			t.Fatalf("filter entry is not an object: %v", filters[0])
+		}
+		if filter["pattern"] != pattern || filter["group"] != "default" {
+			t.Fatalf("got filter %v, want pattern %s in group default", filter, pattern)
+		}
+		rules, ok := filter["rules"].(map[string]any)
+		if !ok {
+			t.Fatalf("filter rules are not an object: %v", filter["rules"])
+		}
+		if rules["base"] != cwdSlash {
+			t.Fatalf("rules base = %v, want %s", rules["base"], cwdSlash)
+		}
+		// File lines first, then the stored --exclude values.
+		wantExcludes := []any{"docs/**", "vendor/**"}
+		gotExcludes, ok := rules["excludes"].([]any)
+		if !ok || !slices.Equal(gotExcludes, wantExcludes) {
+			t.Fatalf("rules excludes = %v, want %v", rules["excludes"], wantExcludes)
+		}
+		if rules["ignoreFile"] != ".mlignore" {
+			t.Fatalf("rules ignoreFile = %v, want .mlignore", rules["ignoreFile"])
+		}
+		if !slices.Equal(stringSlice(rules["flagExcludes"]), []string{"vendor/**"}) {
+			t.Fatalf("rules flagExcludes = %v, want [vendor/**]", rules["flagExcludes"])
+		}
+		// includeHidden is omitempty, so false arrives as JSON-absent.
+		if v, ok := rules["includeHidden"].(bool); ok && v {
+			t.Fatalf("rules includeHidden = %v, want false (unchanged)", rules["includeHidden"])
+		}
+	})
+
+	t.Run("exclude flag replaces stored values only when changed", func(t *testing.T) {
+		reloadBodies = nil
+		oldExcludes := excludes
+		oldHidden := includeHidden
+		defer func() { excludes, includeHidden = oldExcludes, oldHidden }()
+		excludes = []string{"other/**"}
+		includeHidden = true
+
+		if err := doReload(addr, true, true); err != nil {
+			t.Fatal(err)
+		}
+		rules, ok := reloadBodies[0]["filters"].([]any)[0].(map[string]any)["rules"].(map[string]any)
+		if !ok {
+			t.Fatal("filter rules are not an object")
+		}
+		wantExcludes := []any{"docs/**", "other/**"}
+		gotExcludes, ok := rules["excludes"].([]any)
+		if !ok || !slices.Equal(gotExcludes, wantExcludes) {
+			t.Fatalf("rules excludes = %v, want %v", rules["excludes"], wantExcludes)
+		}
+		if !slices.Equal(stringSlice(rules["flagExcludes"]), []string{"other/**"}) {
+			t.Fatalf("rules flagExcludes = %v, want [other/**]", rules["flagExcludes"])
+		}
+		if rules["includeHidden"] != true {
+			t.Fatalf("rules includeHidden = %v, want true (flag given)", rules["includeHidden"])
+		}
+	})
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		defer func() {
+			if err := r.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		b, err := io.ReadAll(r)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- string(b)
+	}()
+	fn()
+	os.Stdout = oldStdout
+	w.Close()
+	return <-done
+}
+
+// fakeLogDir points XDG_STATE_HOME at a fresh directory and returns the log
+// directory inside it plus the state root (for the backup directory).
+func fakeLogDir(t *testing.T) (string, string) {
+	t.Helper()
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	dir := filepath.Join(state, "ml", "log")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir, state
+}
+
+func TestRun_ClientCommandsDoNotCreateLogFile(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func()
+		args  []string
+	}{
+		{"status", func() { statusServer = true }, nil},
+		{"prune", func() { pruneMode = true }, nil},
+		{"reload without server", func() { reloadMode = true }, nil},
+		{"shutdown dead port", func() { shutdownServer = true }, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logDir, _ := fakeLogDir(t)
+			// Isolate the port as well: these commands probe the default
+			// port, and a "dead" one may well be a locally running ml
+			// session — "shutdown" would then POST to it for real.
+			oldPort := port
+			port = freePort(t)
+			tt.setup()
+			defer func() {
+				port = oldPort
+				statusServer, pruneMode, reloadMode, shutdownServer = false, false, false, false
+			}()
+
+			// The command may fail (nothing to talk to) — that is fine; the
+			// point is that no log file is created along the way.
+			if runErr := run(rootCmd, tt.args); runErr != nil {
+				t.Logf("run failed as expected without a server: %v", runErr)
+			}
+
+			entries, err := os.ReadDir(logDir)
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return
+				}
+				t.Fatal(err)
+			}
+			if len(entries) > 0 {
+				t.Fatalf("client-only command created log files: %v", entries)
+			}
+		})
+	}
+}
+
+func TestPrune_StaleLogsRemoved(t *testing.T) {
+	logDir, stateDir := fakeLogDir(t)
+
+	// A running server keeps its logs.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_/api/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"version": "0.2.0", "app": "ml", "pid": 1}) //nolint:errcheck
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	alivePort, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(ts.URL, "http://127.0.0.1:"), ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string) {
+		if err := os.WriteFile(filepath.Join(logDir, name), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(fmt.Sprintf("ml-%d.log", alivePort))
+	write("ml-26999.log")
+	write("ml-26998.log.1") // rotation of a dead port
+
+	// 26997 has a saved session that must only be reported, not removed.
+	backupDir := filepath.Join(stateDir, "ml", "backup")
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeBackup := filepath.Join(backupDir, "ml-26997.json")
+	if err := os.WriteFile(writeBackup, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// And its log, so the port is visited at all.
+	write("ml-26997.log")
+
+	out := captureStderr(t, func() {
+		if err := doPrune(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	if _, err := os.Stat(filepath.Join(logDir, fmt.Sprintf("ml-%d.log", alivePort))); err != nil {
+		t.Fatalf("log of running server was removed: %v", err)
+	}
+	for _, name := range []string{"ml-26999.log", "ml-26998.log.1"} {
+		if _, err := os.Stat(filepath.Join(logDir, name)); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("%s was not removed: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(writeBackup); err != nil {
+		t.Fatalf("saved session removed without --prune-backups: %v", err)
+	}
+	if !strings.Contains(out, "use --prune-backups to remove") {
+		t.Fatalf("stderr %q lacks the saved-session hint", out)
+	}
+	if !strings.Contains(out, "pruned 3 stale log file(s)") {
+		t.Fatalf("stderr %q lacks the summary", out)
+	}
+}
+
+func TestPrune_BackupsWithConfirmation(t *testing.T) {
+	logDir, stateDir := fakeLogDir(t)
+	backupDir := filepath.Join(stateDir, "ml", "backup")
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backupPath := filepath.Join(backupDir, "ml-26997.json")
+	if err := os.WriteFile(backupPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "ml-26997.log"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Feed "y" to the confirmation prompt.
+	pruneBackups = true
+	defer func() { pruneBackups = false }()
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.WriteString("y\n"); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	defer func() {
+		os.Stdin = oldStdin
+		r.Close() //nolint:errcheck
+	}()
+
+	out := captureStderr(t, func() {
+		if err := doPrune(); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := os.Stat(backupPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("saved session not removed despite confirmation: %v", err)
+	}
+	if !strings.Contains(out, "remove saved session for port 26997") {
+		t.Fatalf("stderr %q lacks the confirmation prompt", out)
+	}
+}
+
+func TestDoStatus_MarksStaleForeignAndWatcher(t *testing.T) {
+	logDir, _ := fakeLogDir(t)
+
+	healthy := httptest.NewServer(newStatusMux(map[string]any{
+		"version": "0.2.0", "app": "ml", "pid": 11,
+		"watcher": map[string]any{"status": "degraded", "failed": 2, "pendingRetries": 2,
+			"lastError": "FSEventStreamStart failed", "lastErrorPath": "/repo/link"},
+	}))
+	defer healthy.Close()
+	foreign := httptest.NewServer(newStatusMux(map[string]any{
+		"version": "1.6.8", "app": "mo", "pid": 12,
+	}))
+	defer foreign.Close()
+	legacy := httptest.NewServer(newStatusMux(map[string]any{
+		"version": "0.1.0", "pid": 13,
+	}))
+	defer legacy.Close()
+
+	portOf := func(url string) int {
+		t.Helper()
+		p, err := strconv.Atoi(url[strings.LastIndex(url, ":")+1:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// A stale port: a log file with no listener behind it.
+	stalePort := 26995
+
+	for _, tc := range []struct {
+		port  int
+		label string
+	}{
+		{portOf(healthy.URL), "ml-%d.log"},
+		{portOf(foreign.URL), "ml-%d.log"},
+		{portOf(legacy.URL), "ml-%d.log"},
+		{stalePort, "ml-%d.log"},
+	} {
+		if err := os.WriteFile(filepath.Join(logDir, fmt.Sprintf(tc.label, tc.port)), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out := captureStdout(t, func() {
+		if err := doStatus(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	if !strings.Contains(out, "stale: no server; log file left over") {
+		t.Fatalf("output lacks the stale marking:\n%s", out)
+	}
+	if !strings.Contains(out, "not ml: app=mo version=1.6.8") {
+		t.Fatalf("output lacks the foreign marking:\n%s", out)
+	}
+	if !strings.Contains(out, "no app field; ml <=0.1.0 or upstream mo") {
+		t.Fatalf("output lacks the legacy marking:\n%s", out)
+	}
+	if !strings.Contains(out, "watcher: degraded — 2 failed registration(s), 2 retry(s) pending (last: FSEventStreamStart failed at /repo/link)") {
+		t.Fatalf("output lacks the degraded watcher line:\n%s", out)
+	}
+}
+
+// newStatusMux serves GET /_/api/status with the given JSON body.
+func newStatusMux(status map[string]any) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_/api/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(status) //nolint:errcheck
+	})
+	return mux
+}
+
+func TestEmitServeOutput_VerboseElision(t *testing.T) {
+	many := make([]deeplinkEntry, 0, 12)
+	for i := range 12 {
+		many = append(many, deeplinkEntry{
+			URL:  fmt.Sprintf("http://localhost:6275/?file=%02d", i),
+			Path: fmt.Sprintf("/home/user/f%02d.md", i),
+		})
+	}
+	few := many[:2]
+
+	t.Run("more than ten entries elides to three plus a hint", func(t *testing.T) {
+		verbose = false
+		defer func() { verbose = false }()
+		jsonOutput = false
+
+		out := captureStdout(t, func() {
+			emitServeOutput("localhost:6275", many, true)
+		})
+		stderr := captureStderr(t, func() {
+			printDeeplinks(many)
+		})
+
+		if got := strings.Count(out, "http://localhost:6275/?file="); got != 3 {
+			t.Fatalf("stdout lists %d links, want 3 (elided):\n%s", got, out)
+		}
+		if !strings.Contains(stderr, "and 9 more file(s)") || !strings.Contains(stderr, "--verbose") {
+			t.Fatalf("stderr lacks the elision hint:\n%s", stderr)
+		}
+	})
+
+	t.Run("verbose lists every link", func(t *testing.T) {
+		verbose = true
+		defer func() { verbose = false }()
+		jsonOutput = false
+
+		out := captureStdout(t, func() {
+			emitServeOutput("localhost:6275", many, true)
+		})
+		if got := strings.Count(out, "http://localhost:6275/?file="); got != 12 {
+			t.Fatalf("stdout lists %d links, want 12:\n%s", got, out)
+		}
+	})
+
+	t.Run("few entries are never elided", func(t *testing.T) {
+		verbose = false
+		defer func() { verbose = false }()
+		jsonOutput = false
+
+		out := captureStdout(t, func() {
+			emitServeOutput("localhost:6275", few, true)
+		})
+		if got := strings.Count(out, "http://localhost:6275/?file="); got != 2 {
+			t.Fatalf("stdout lists %d links, want 2:\n%s", got, out)
+		}
+	})
+}
+
+func TestServeSummary_Text(t *testing.T) {
+	t.Run("full summary with degraded watcher", func(t *testing.T) {
+		d := serveSummaryData{
+			PID:              4821,
+			RestoredFiles:    216,
+			RestoredPatterns: 2,
+			AddedFromArgs:    12,
+			Groups:           2,
+			Files:            742,
+			Patterns:         1,
+			ScannedDirs:      4700,
+			ScannedFiles:     742,
+			Symlinked:        4383,
+			Excluded:         30,
+			Watcher:          &server.WatcherStatus{Status: "degraded", Failed: 2, LastError: "FSEventStreamStart failed"},
+		}
+		out := captureStderr(t, func() {
+			printServeSummary("localhost:6275", d)
+		})
+		for _, want := range []string{
+			"ml: serving at http://localhost:6275 (pid 4821)",
+			"ml: restored 216 file(s) and 2 pattern(s) from the previous session; 12 file(s) added from arguments",
+			"ml: 2 group(s), 742 file(s), 1 pattern(s); watcher: 0 root, 0 dir, 0 file",
+			"ml: scanned 4700 dir(s) / 742 file(s) — 4383 reached through symlinks",
+			"ml: 30 file(s) excluded by .mlignore/--exclude",
+			"ml: watcher degraded: 2 registration(s) failed (FSEventStreamStart failed); retrying",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("summary lacks %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("zero fields print nothing", func(t *testing.T) {
+		out := captureStderr(t, func() {
+			printServeSummary("localhost:6275", serveSummaryData{PID: 7})
+		})
+		if !strings.Contains(out, "ml: serving at http://localhost:6275 (pid 7)") {
+			t.Fatalf("summary lacks the serving line:\n%s", out)
+		}
+		for _, unexpected := range []string{"restored", "scanned", "excluded", "watcher"} {
+			if strings.Contains(out, unexpected) {
+				t.Fatalf("summary unexpectedly mentions %q:\n%s", unexpected, out)
+			}
+		}
+	})
+}
+
+func TestWarnLargePattern(t *testing.T) {
+	oldFiles, oldDirs, oldTotal := watchSummaryWarnFiles, watchSummaryWarnDirs, watchSummaryWarnTotal
+	watchSummaryWarnFiles, watchSummaryWarnDirs, watchSummaryWarnTotal = 5000, 1000, 2000
+	defer func() {
+		watchSummaryWarnFiles, watchSummaryWarnDirs, watchSummaryWarnTotal = oldFiles, oldDirs, oldTotal
+	}()
+
+	t.Run("small tree is silent", func(t *testing.T) {
+		out := captureStderr(t, func() {
+			warnLargePattern("docs/**/*.md", server.PatternStats{Dirs: 100, Files: 200})
+		})
+		if out != "" {
+			t.Fatalf("unexpected warning:\n%s", out)
+		}
+	})
+
+	t.Run("huge tree warns", func(t *testing.T) {
+		out := captureStderr(t, func() {
+			warnLargePattern("docs/**/*.md", server.PatternStats{Dirs: 4700, Files: 742, SymlinkedDirs: 4383})
+		})
+		if !strings.Contains(out, "expands to 5442 entries (4700 dirs, 742 files), 4383 of them reached through symlinks") {
+			t.Fatalf("warning lacks the counts:\n%s", out)
+		}
+		if !strings.Contains(out, ".mlignore") {
+			t.Fatalf("warning lacks the remediation hint:\n%s", out)
+		}
+	})
+
+	t.Run("symlinked tree warns below the absolute thresholds", func(t *testing.T) {
+		out := captureStderr(t, func() {
+			warnLargePattern("docs/**/*.md", server.PatternStats{Dirs: 900, Files: 1200, SymlinkedDirs: 800})
+		})
+		if !strings.Contains(out, "expands to 2100 entries") {
+			t.Fatalf("symlink-heavy tree did not warn:\n%s", out)
 		}
 	})
 }

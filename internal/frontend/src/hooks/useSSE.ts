@@ -1,8 +1,11 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
+import type { WatcherStatus } from "./useApi";
 
 interface SSECallbacks {
   onUpdate: () => void;
   onFileChanged?: (fileId: string) => void;
+  /** Receives the watcher health on connect and on every status change. */
+  onWatcherStatus?: (status: WatcherStatus) => void;
 }
 
 export function useSSE(callbacks: SSECallbacks) {
@@ -45,6 +48,16 @@ export function useSSE(callbacks: SSECallbacks) {
         try {
           const data = JSON.parse(e.data);
           callbacksRef.current.onFileChanged?.(data.id);
+        } catch {
+          // ignore malformed data
+        }
+      });
+
+      es.addEventListener("watcher", (e) => {
+        try {
+          const data = JSON.parse(e.data) as WatcherStatus;
+          if (typeof data?.status !== "string") return;
+          callbacksRef.current.onWatcherStatus?.(data);
         } catch {
           // ignore malformed data
         }

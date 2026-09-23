@@ -30,6 +30,17 @@ type Rules struct {
 	// The default (false) hides them unless the pattern names the dotted
 	// component literally.
 	IncludeHidden bool `json:"includeHidden,omitempty"`
+
+	// IgnoreFile and FlagExcludes are provenance metadata that let `ml
+	// --reload` decide which part of the rules to replace: IgnoreFile names
+	// the ignore file the leading lines of Excludes were read from (empty
+	// for pre-split data), FlagExcludes repeats the --exclude values that
+	// trail them. They never affect evaluation, so Empty and Equal ignore
+	// them on purpose. FlagExcludes has no omitempty so a pattern
+	// registered by ml ≥ 0.2.0 always carries it (even empty), keeping
+	// pre-split data distinguishable.
+	IgnoreFile   string   `json:"ignoreFile,omitempty"`
+	FlagExcludes []string `json:"flagExcludes"`
 }
 
 // Empty reports whether the rules carry no user configuration, in which case
@@ -47,7 +58,12 @@ func (r *Rules) Equal(other Rules) bool {
 // line is reported as an error so that a typo in a hand-written rule fails
 // loudly.
 func (r *Rules) Filter() (*Filter, error) {
-	f := &Filter{base: filepath.ToSlash(filepath.Clean(r.Base)), include: r.IncludeHidden}
+	f := &Filter{
+		base:         filepath.ToSlash(filepath.Clean(r.Base)),
+		include:      r.IncludeHidden,
+		ignoreFile:   r.IgnoreFile,
+		flagExcludes: r.FlagExcludes,
+	}
 	for _, line := range r.Excludes {
 		parsed, ok, err := parseLine(line)
 		if err != nil {
@@ -63,10 +79,12 @@ func (r *Rules) Filter() (*Filter, error) {
 
 // Filter is an immutable, concurrency-safe set of exclusion rules.
 type Filter struct {
-	base    string
-	lines   []string
-	rules   []rule
-	include bool
+	base         string
+	lines        []string
+	rules        []rule
+	include      bool
+	ignoreFile   string
+	flagExcludes []string
 }
 
 // Rules returns the raw form of the filter, for status output and persistence.
@@ -75,6 +93,8 @@ func (f *Filter) Rules() Rules {
 		Base:          f.base,
 		Excludes:      slices.Clone(f.lines),
 		IncludeHidden: f.include,
+		IgnoreFile:    f.ignoreFile,
+		FlagExcludes:  slices.Clone(f.flagExcludes),
 	}
 }
 

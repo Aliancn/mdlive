@@ -108,3 +108,55 @@ describe("useSSE started event", () => {
     expect(window.location.reload).toHaveBeenCalledOnce();
   });
 });
+
+describe("useSSE watcher event", () => {
+  it("invokes onWatcherStatus with a valid payload", () => {
+    const onWatcherStatus = vi.fn();
+    renderHook(() => useSSE({ onUpdate: vi.fn(), onWatcherStatus }));
+
+    instances[0].emit(
+      "watcher",
+      JSON.stringify({
+        status: "degraded",
+        roots: 1,
+        dirWatches: 0,
+        fileWatches: 0,
+        failed: 2,
+        pendingRetries: 2,
+        circuitOpen: false,
+        totalFailures: 2,
+        totalRecovered: 0,
+        lastError: "FSEventStreamStart failed",
+      }),
+    );
+
+    expect(onWatcherStatus).toHaveBeenCalledOnce();
+    const status = onWatcherStatus.mock.calls[0][0];
+    expect(status.status).toBe("degraded");
+    expect(status.failed).toBe(2);
+  });
+
+  it("ignores a malformed watcher payload", () => {
+    const onWatcherStatus = vi.fn();
+    renderHook(() => useSSE({ onUpdate: vi.fn(), onWatcherStatus }));
+
+    instances[0].emit("watcher", "not json{");
+
+    expect(onWatcherStatus).not.toHaveBeenCalled();
+  });
+
+  it("ignores a payload without a status string", () => {
+    const onWatcherStatus = vi.fn();
+    renderHook(() => useSSE({ onUpdate: vi.fn(), onWatcherStatus }));
+
+    instances[0].emit("watcher", JSON.stringify({ failed: 1 }));
+
+    expect(onWatcherStatus).not.toHaveBeenCalled();
+  });
+
+  it("does not throw when onWatcherStatus is omitted", () => {
+    renderHook(() => useSSE({ onUpdate: vi.fn() }));
+
+    expect(() => instances[0].emit("watcher", JSON.stringify({ status: "healthy" }))).not.toThrow();
+  });
+});
