@@ -8,9 +8,9 @@ import rehypeSlug from "rehype-slug";
 import rehypeKatex from "rehype-katex";
 import { rehypeGithubAlerts } from "rehype-github-alerts";
 import "katex/dist/katex.min.css";
-import { codeToHtml } from "shiki";
 import mermaid from "mermaid";
 import { fetchFileContent, openRelativeFile } from "../hooks/useApi";
+import { highlightCode, isSupportedLanguage } from "../utils/highlight";
 import { isPlainLeftClick } from "../utils/linkClick";
 import { escapeRegExp } from "../utils/regex";
 import { RawToggle } from "./RawToggle";
@@ -78,12 +78,6 @@ function urlTransform(url: string, key: string): string {
   }
   return defaultUrlTransform(url);
 }
-
-// Both themes are rendered in one pass: the inline colors are the light
-// theme, and the dark colors ride along as --shiki-dark CSS variables that
-// app.css applies under [data-theme="dark"]. Toggling the theme therefore
-// needs no re-highlight.
-const SHIKI_THEMES = { light: "github-light", dark: "github-dark" } as const;
 
 interface MarkdownViewerProps {
   fileId: string;
@@ -471,29 +465,31 @@ function CodeBlockCopyButton({ code, themed = false }: { code: string; themed?: 
   );
 }
 
-function CodeBlock({ language, code }: { language: string; code: string }) {
+// Highlighted HTML for a code block, memoized by (lang, code) across mounts
+// via utils/highlight. Unsupported language labels highlight as plain text
+// instead of round-tripping a rejected pass first.
+function useHighlightedHtml(code: string, language: string): string {
   const [html, setHtml] = useState("");
 
   useEffect(() => {
     let cancelled = false;
-    codeToHtml(code, { lang: language, themes: SHIKI_THEMES })
+    setHtml("");
+    const lang = isSupportedLanguage(language) ? language : "text";
+    highlightCode(code, lang)
       .then((result) => {
         if (!cancelled) setHtml(result);
       })
-      .catch(() => {
-        // Fallback: if language not supported, try plaintext
-        if (!cancelled) {
-          codeToHtml(code, { lang: "text", themes: SHIKI_THEMES })
-            .then((result) => {
-              if (!cancelled) setHtml(result);
-            })
-            .catch(() => {});
-        }
-      });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [code, language]);
+
+  return html;
+}
+
+function CodeBlock({ language, code }: { language: string; code: string }) {
+  const html = useHighlightedHtml(code, language);
 
   if (html) {
     return (
@@ -527,28 +523,7 @@ function FrontmatterBlock({ yaml }: { yaml: string }) {
 }
 
 function HighlightedView({ content, language }: { content: string; language: string }) {
-  const [html, setHtml] = useState("");
-
-  useEffect(() => {
-    let cancelled = false;
-    setHtml("");
-    codeToHtml(content, { lang: language, themes: SHIKI_THEMES })
-      .then((result) => {
-        if (!cancelled) setHtml(result);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          codeToHtml(content, { lang: "text", themes: SHIKI_THEMES })
-            .then((result) => {
-              if (!cancelled) setHtml(result);
-            })
-            .catch(() => {});
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [content, language]);
+  const html = useHighlightedHtml(content, language);
 
   if (html) {
     return <div className="[&_pre]:!rounded-none" dangerouslySetInnerHTML={{ __html: html }} />;
