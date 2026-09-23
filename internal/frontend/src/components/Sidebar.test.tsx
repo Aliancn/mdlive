@@ -404,6 +404,29 @@ describe("Sidebar", () => {
     Element.prototype.scrollIntoView = original;
   });
 
+  it("keeps the file menu visible on the active row without hover", () => {
+    render(
+      <Sidebar
+        groups={groups}
+        activeGroup="default"
+        activeFileId="aaa11111"
+        onFileSelect={() => {}}
+        onFilesReorder={() => {}}
+        viewMode="flat"
+        showTitle={false}
+        searchQuery={null}
+        onSearchQueryChange={() => {}}
+      />,
+    );
+    const menus = screen.getAllByTitle("More actions");
+    expect(menus).toHaveLength(2);
+    // The active row's menu is always visible; other rows show it on hover
+    // or keyboard focus.
+    expect(menus[0].className).toContain("opacity-100");
+    expect(menus[0].className).not.toContain("opacity-0");
+    expect(menus[1].className).toContain("opacity-0");
+  });
+
   it("shows the directory for duplicate file names in flat view", () => {
     const dupGroups: Group[] = [
       {

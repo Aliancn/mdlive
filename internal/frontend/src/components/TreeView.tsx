@@ -333,6 +333,7 @@ function FileNodeItem({
       <FileContextMenu
         file={file}
         isOpen={menuOpenId === file.id}
+        isActive={isActive}
         otherGroups={otherGroups}
         onToggle={onMenuToggle}
         onOpenInNewTab={onOpenInNewTab}
