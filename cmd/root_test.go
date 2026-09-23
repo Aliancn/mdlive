@@ -1652,3 +1652,114 @@ func TestRestorePatternSpecs(t *testing.T) {
 		}
 	})
 }
+
+// captureStderr runs fn while capturing what it writes to os.Stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		defer func() {
+			if err := r.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		b, err := io.ReadAll(r)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- string(b)
+	}()
+	fn()
+	os.Stderr = oldStderr
+	w.Close()
+	return <-done
+}
+
+func TestProbeServer_AppField(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   map[string]any
+		wantErr  bool
+		wantNote string // empty: no stderr note expected
+		wantApp  string
+		wantVer  string
+	}{
+		{
+			name:    "ml server passes",
+			status:  map[string]any{"version": "0.2.0", "app": "ml", "pid": 1, "groups": []any{}},
+			wantApp: "ml",
+			wantVer: "0.2.0",
+		},
+		{
+			name:     "legacy server without app passes with note",
+			status:   map[string]any{"version": "0.1.0", "pid": 1, "groups": []any{}},
+			wantApp:  "",
+			wantVer:  "0.1.0",
+			wantNote: "did not identify itself (ml ≤ 0.1.0",
+		},
+		{
+			name:     "legacy server with 1.x version hints at mo",
+			status:   map[string]any{"version": "1.6.8", "pid": 1, "groups": []any{}},
+			wantApp:  "",
+			wantVer:  "1.6.8",
+			wantNote: "may be an upstream mo instance",
+		},
+		{
+			name:    "foreign app is rejected",
+			status:  map[string]any{"version": "1.6.8", "app": "mo", "pid": 1, "groups": []any{}},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/_/api/status" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(tt.status) //nolint:errcheck
+			}))
+			defer ts.Close()
+			addr := strings.TrimPrefix(ts.URL, "http://")
+
+			res, err := probeServer(addr)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("probeServer succeeded, want foreign-server error")
+				}
+				if !errors.Is(err, errForeignServer) {
+					t.Fatalf("error %v does not mark a foreign server", err)
+				}
+				if !strings.Contains(err.Error(), "is a mo instance") || !strings.Contains(err.Error(), "use --port") {
+					t.Fatalf("error %v lacks the identity details", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("probeServer returned error: %v", err)
+			}
+			if res.app != tt.wantApp || res.version != tt.wantVer {
+				t.Fatalf("got app=%q version=%q, want %q/%q", res.app, res.version, tt.wantApp, tt.wantVer)
+			}
+
+			// The legacy note is printed exactly once per attach decision.
+			captured := captureStderr(t, func() {
+				noteLegacyServer(addr, res)
+			})
+			if tt.wantNote == "" && captured != "" {
+				t.Fatalf("unexpected stderr note: %q", captured)
+			}
+			if tt.wantNote != "" && !strings.Contains(captured, tt.wantNote) {
+				t.Fatalf("stderr note %q does not contain %q", captured, tt.wantNote)
+			}
+		})
+	}
+}

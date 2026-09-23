@@ -25,12 +25,12 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/k1LoW/errors"
 
-	"github.com/k1LoW/donegroup"
 	"github.com/Aliancn/mdlive/internal/backup"
 	"github.com/Aliancn/mdlive/internal/ignore"
 	"github.com/Aliancn/mdlive/internal/logfile"
 	"github.com/Aliancn/mdlive/internal/server"
 	"github.com/Aliancn/mdlive/version"
+	"github.com/k1LoW/donegroup"
 	"github.com/muesli/termenv"
 	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
@@ -271,6 +271,10 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 		wasServerRunning := false
 		if _, err := probeServer(addr, probeTimeoutFast); err == nil {
 			wasServerRunning = true
+		} else if errors.Is(err, errForeignServer) {
+			// Clearing the session of another application's server is out of
+			// scope; refuse instead of silently ignoring it.
+			return err
 		}
 		hasBackup := backup.Exists(port)
 
@@ -441,6 +445,8 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 		if _, err := probeServer(addr, probeTimeoutDefault); err == nil {
 			openBrowser(addr)
 			return nil
+		} else if errors.Is(err, errForeignServer) {
+			return err
 		}
 	}
 
@@ -448,6 +454,7 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 	if stdinData != nil || len(files) > 0 || len(patternSpecs) > 0 {
 		result, probeErr := probeServer(addr, probeTimeoutFast)
 		if probeErr == nil {
+			noteLegacyServer(addr, result)
 			isNewGroup := !slices.Contains(result.groups, target)
 
 			var deeplinks []deeplinkEntry
@@ -486,6 +493,10 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 				openBrowser(addr)
 			}
 			return nil
+		} else if errors.Is(probeErr, errForeignServer) {
+			// A live server identified itself as another application; pushing
+			// files into it would silently corrupt its state.
+			return probeErr
 		}
 	}
 
@@ -1023,10 +1034,10 @@ type jsonServeOutput struct {
 }
 
 type jsonStatusGroupEntry struct {
-	Name           string                      `json:"name"`
-	Files          int                         `json:"files"`
-	Patterns       []string                    `json:"patterns,omitempty"`
-	PatternFilters []server.PatternFilterData  `json:"patternFilters,omitempty"`
+	Name           string                     `json:"name"`
+	Files          int                        `json:"files"`
+	Patterns       []string                   `json:"patterns,omitempty"`
+	PatternFilters []server.PatternFilterData `json:"patternFilters,omitempty"`
 }
 
 type jsonStatusEntry struct {
@@ -1145,12 +1156,21 @@ func emitServeOutput(addr string, deeplinks []deeplinkEntry, printURL bool) {
 }
 
 type probeResult struct {
-	client *http.Client
-	groups []string
+	client  *http.Client
+	groups  []string
+	app     string
+	version string
 }
+
+// errForeignServer marks a probe that reached a healthy server which
+// identified itself as another application. Callers surface it instead of
+// falling through to starting (or acting on) the wrong server.
+var errForeignServer = errors.New("foreign server on port")
 
 // probeServer checks that a ml server is running on addr by calling
 // GET /_/api/status and validating the response contains a version field.
+// Servers reporting an app identity other than ml are rejected; servers
+// without one (ml ≤ 0.1.0, or a compatible program) are accepted as legacy.
 func probeServer(addr string, timeout ...time.Duration) (*probeResult, error) {
 	t := probeTimeoutDefault
 	if len(timeout) > 0 {
@@ -1169,6 +1189,7 @@ func probeServer(addr string, timeout ...time.Duration) (*probeResult, error) {
 
 	var status struct {
 		Version string `json:"version"`
+		App     string `json:"app"`
 		PID     int    `json:"pid"`
 		Groups  []struct {
 			Name string `json:"name"`
@@ -1177,12 +1198,46 @@ func probeServer(addr string, timeout ...time.Duration) (*probeResult, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil || status.Version == "" {
 		return nil, fmt.Errorf("server on %s is not a ml instance", addr)
 	}
+	if status.App != "" && status.App != server.AppName {
+		return nil, fmt.Errorf("%w %s: server is a %s instance (version %s), not ml; use --port to target a different port", errForeignServer, addr, status.App, status.Version)
+	}
 
 	groups := make([]string, len(status.Groups))
 	for i, g := range status.Groups {
 		groups[i] = g.Name
 	}
-	return &probeResult{client: client, groups: groups}, nil
+	return &probeResult{client: client, groups: groups, app: status.App, version: status.Version}, nil
+}
+
+// noteLegacyServer prints a one-time warning when the server we are about to
+// attach to did not report an app identity. ml ≥ 0.2.0 always sends it, so
+// the server is either an older ml or a program with a compatible status API.
+// A version at or above 1.0.0 cannot be an ml release (ml starts at 0.1.0)
+// and is called out as likely upstream mo.
+func noteLegacyServer(addr string, res *probeResult) {
+	if res.app != "" {
+		return
+	}
+	if major, ok := majorVersion(res.version); ok && major >= 1 {
+		fmt.Fprintf(os.Stderr, "ml: warning: server on http://%s did not identify itself; version %s is not an ml release and may be an upstream mo instance\n", addr, res.version)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "ml: note: server on http://%s did not identify itself (ml ≤ 0.1.0 or a compatible program)\n", addr)
+}
+
+// majorVersion returns the leading major component of a semver-ish version
+// string ("1.6.8" → 1, true).
+func majorVersion(v string) (int, bool) {
+	v = strings.TrimPrefix(v, "v")
+	major, _, ok := strings.Cut(v, ".")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(major)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // waitForServerDownTimeout is the maximum time to wait for a server to stop.

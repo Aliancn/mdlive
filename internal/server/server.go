@@ -200,6 +200,11 @@ const (
 	eventWatcher     = "watcher"
 )
 
+// AppName identifies this application in API responses, so clients can tell
+// an ml server from a foreign instance that happens to serve a compatible
+// status API on the same port.
+const AppName = "ml"
+
 // watchOps is the set of fswatcher ops the watch loop reacts to.
 // Chmod is intentionally excluded because the loop ignores it.
 const watchOps = fswatcher.Create | fswatcher.Write | fswatcher.Remove | fswatcher.Rename
@@ -2567,6 +2572,16 @@ type statusGroup struct {
 	PatternFilters []PatternFilterData `json:"patternFilters,omitempty"`
 }
 
+// StatusResponse is the shape of the GET /_/api/status response.
+type StatusResponse struct {
+	Version  string        `json:"version"`
+	Revision string        `json:"revision"`
+	App      string        `json:"app"`
+	PID      int           `json:"pid"`
+	Groups   []statusGroup `json:"groups"`
+	Watcher  WatcherStatus `json:"watcher"`
+}
+
 func handleStatus(state *State) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		groups := state.Groups()
@@ -2579,15 +2594,10 @@ func handleStatus(state *State) http.HandlerFunc {
 			}
 		}
 
-		resp := struct {
-			Version  string        `json:"version"`
-			Revision string        `json:"revision"`
-			PID      int           `json:"pid"`
-			Groups   []statusGroup `json:"groups"`
-			Watcher  WatcherStatus `json:"watcher"`
-		}{
+		resp := StatusResponse{
 			Version:  version.Version,
 			Revision: version.Revision,
+			App:      AppName,
 			PID:      os.Getpid(),
 			Groups:   statusGroups,
 			Watcher:  state.WatcherStatus(),
@@ -2603,6 +2613,7 @@ func handleVersion() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]string{
+			"app":      AppName,
 			"version":  version.Version,
 			"revision": version.Revision,
 		}); err != nil {
