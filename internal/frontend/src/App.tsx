@@ -15,6 +15,7 @@ import type { ZoomContent } from "./components/ZoomModal";
 import { TocPanel } from "./components/TocPanel";
 import type { TocHeading } from "./components/TocPanel";
 import { EmptyGroupMessage } from "./components/EmptyGroupMessage";
+import { ErrorNotice } from "./components/ErrorNotice";
 import { WatcherBanner } from "./components/WatcherBanner";
 import { useSSE } from "./hooks/useSSE";
 import { useFileDrop } from "./hooks/useFileDrop";
@@ -90,6 +91,7 @@ export function isTocOpenForFile(
 
 export function App() {
   const [groups, setGroups] = useState<Group[]>([]);
+  const [groupsLoadFailed, setGroupsLoadFailed] = useState(false);
   const [activeGroup, setActiveGroup] = useState<string>(
     () => parseGroupFromPath(window.location.pathname) || "default",
   );
@@ -200,6 +202,7 @@ export function App() {
       knownFileIds.current = newIds;
 
       setGroups(data);
+      setGroupsLoadFailed(false);
 
       if (added.length > 0 && !wasEmpty) {
         // Only auto-select if the new file belongs to the current active group
@@ -221,14 +224,21 @@ export function App() {
   }, []);
 
   // Initial data fetch (setState inside .then() is async, not flagged by linter)
-  useEffect(() => {
+  const loadInitialGroups = useCallback(() => {
+    setGroupsLoadFailed(false);
     fetchGroups()
       .then((data) => {
         knownFileIds.current = allFileIds(data);
         setGroups(data);
       })
-      .catch(() => {});
+      .catch(() => {
+        setGroupsLoadFailed(true);
+      });
   }, []);
+
+  useEffect(() => {
+    loadInitialGroups();
+  }, [loadInitialGroups]);
 
   // A relative Markdown link opened in a new tab lands here with from/open params
   // because the target file has no ID until the server resolves it. Resolve it once
@@ -576,6 +586,11 @@ export function App() {
                 scrollToHeading={pendingSearchHeading}
                 onScrolledToHeading={() => setPendingSearchHeading(null)}
                 searchQuery={searchQuery}
+              />
+            ) : groupsLoadFailed && groups.length === 0 ? (
+              <ErrorNotice
+                message="Failed to load files from the server."
+                onRetry={loadInitialGroups}
               />
             ) : (
               <EmptyGroupMessage group={activeGroupData} />

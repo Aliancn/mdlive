@@ -151,6 +151,30 @@ describe("App URL sync", () => {
     setUrl("/");
   });
 
+  it("shows an error with retry when the initial groups fetch fails", async () => {
+    const user = userEvent.setup();
+    let fail = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/_/api/groups") {
+          if (fail) return Promise.resolve({ ok: false });
+          return Promise.resolve({ ok: true, json: async () => groupsPayload });
+        }
+        return Promise.resolve({ ok: true, json: async () => ({}) });
+      }),
+    );
+    render(<App />);
+
+    expect(await screen.findByText("Failed to load files from the server.")).toBeInTheDocument();
+
+    fail = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    await screen.findByText("GUIDE.md");
+  });
+
   it("updates URL with ?file= when a file is clicked in the sidebar", async () => {
     const user = userEvent.setup();
     render(<App />);
