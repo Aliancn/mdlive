@@ -1,14 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Sidebar } from "./Sidebar";
-import { moveFile } from "../hooks/useApi";
+import { moveFile, uploadFile } from "../hooks/useApi";
 import type { Group, SearchResult } from "../hooks/useApi";
 import { ToastProvider } from "./Toast";
 
 vi.mock("../hooks/useApi", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../hooks/useApi")>();
-  return { ...actual, moveFile: vi.fn() };
+  return { ...actual, moveFile: vi.fn(), uploadFile: vi.fn() };
 });
 
 const groups: Group[] = [
@@ -51,6 +51,7 @@ function hasTextContent(text: string) {
 
 beforeEach(() => {
   localStorage.clear();
+  vi.clearAllMocks();
 });
 
 describe("Sidebar", () => {
@@ -196,7 +197,7 @@ describe("Sidebar", () => {
     expect(screen.getByTitle("/GUIDE.md")).toBeInTheDocument();
   });
 
-  it("renders empty when group has no files", () => {
+  it("renders only the add-files button when group has no files", () => {
     const emptyGroups: Group[] = [{ name: "empty", files: [] }];
     render(
       <Sidebar
@@ -211,7 +212,60 @@ describe("Sidebar", () => {
         onSearchQueryChange={() => {}}
       />,
     );
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add files" })).toBeInTheDocument();
+    expect(screen.queryByTitle("More actions")).not.toBeInTheDocument();
+  });
+
+  it("shows the total file count in a footer", () => {
+    render(
+      <Sidebar
+        groups={groups}
+        activeGroup="default"
+        activeFileId={null}
+        onFileSelect={() => {}}
+        onFilesReorder={() => {}}
+        viewMode="flat"
+        showTitle={false}
+        searchQuery={null}
+        onSearchQueryChange={() => {}}
+      />,
+    );
+    expect(screen.getByText("2 files")).toBeInTheDocument();
+  });
+
+  it("uses the singular form for a single file", () => {
+    render(
+      <Sidebar
+        groups={groups}
+        activeGroup="docs"
+        activeFileId={null}
+        onFileSelect={() => {}}
+        onFilesReorder={() => {}}
+        viewMode="flat"
+        showTitle={false}
+        searchQuery={null}
+        onSearchQueryChange={() => {}}
+      />,
+    );
+    expect(screen.getByText("1 file")).toBeInTheDocument();
+  });
+
+  it("hides the footer for an empty group", () => {
+    const emptyGroups: Group[] = [{ name: "empty", files: [] }];
+    render(
+      <Sidebar
+        groups={emptyGroups}
+        activeGroup="empty"
+        activeFileId={null}
+        onFileSelect={() => {}}
+        onFilesReorder={() => {}}
+        viewMode="flat"
+        showTitle={false}
+        searchQuery={null}
+        onSearchQueryChange={() => {}}
+      />,
+    );
+    expect(screen.queryByText("0 files")).not.toBeInTheDocument();
   });
 
   it("shows search input when searchQuery is non-null", () => {
@@ -587,5 +641,245 @@ describe("Sidebar", () => {
     );
     // The saved collapse state is overridden for the active file's ancestors.
     expect(screen.getByText("deep.md")).toBeInTheDocument();
+  });
+
+  describe("recently viewed section", () => {
+    const manyGroups: Group[] = [
+      {
+        name: "default",
+        files: Array.from({ length: 6 }, (_, i) => ({
+          id: `file${i}`,
+          name: `file${i}.md`,
+          path: `/file${i}.md`,
+        })),
+      },
+    ];
+
+    it("shows recent files except the active one", () => {
+      render(
+        <Sidebar
+          groups={manyGroups}
+          activeGroup="default"
+          activeFileId="file5"
+          onFileSelect={() => {}}
+          onFilesReorder={() => {}}
+          viewMode="flat"
+          showTitle={false}
+          recentFileIds={["file5", "file3", "file1"]}
+          searchQuery={null}
+          onSearchQueryChange={() => {}}
+        />,
+      );
+      // The active file is already highlighted in the list below; the recent
+      // section shows the others (their names appear twice: recent + list).
+      expect(screen.getByText("Recent")).toBeInTheDocument();
+      expect(screen.getAllByText("file3.md")).toHaveLength(2);
+      expect(screen.getAllByText("file1.md")).toHaveLength(2);
+      expect(screen.getAllByText("file5.md")).toHaveLength(1);
+      // Files never viewed recently appear only in the list.
+      expect(screen.getAllByText("file0.md")).toHaveLength(1);
+    });
+
+    it("hides the section for short file lists", () => {
+      render(
+        <Sidebar
+          groups={groups}
+          activeGroup="default"
+          activeFileId="aaa11111"
+          onFileSelect={() => {}}
+          onFilesReorder={() => {}}
+          viewMode="flat"
+          showTitle={false}
+          recentFileIds={["aaa11111", "bbb22222"]}
+          searchQuery={null}
+          onSearchQueryChange={() => {}}
+        />,
+      );
+      expect(screen.queryByText("Recent")).not.toBeInTheDocument();
+    });
+
+    it("hides the section while searching", () => {
+      render(
+        <Sidebar
+          groups={manyGroups}
+          activeGroup="default"
+          activeFileId="file5"
+          onFileSelect={() => {}}
+          onFilesReorder={() => {}}
+          viewMode="flat"
+          showTitle={false}
+          recentFileIds={["file3", "file1"]}
+          searchQuery="file"
+          onSearchQueryChange={() => {}}
+        />,
+      );
+      expect(screen.queryByText("Recent")).not.toBeInTheDocument();
+    });
+
+    it("skips ids that no longer exist in the group", () => {
+      render(
+        <Sidebar
+          groups={manyGroups}
+          activeGroup="default"
+          activeFileId="file5"
+          onFileSelect={() => {}}
+          onFilesReorder={() => {}}
+          viewMode="flat"
+          showTitle={false}
+          recentFileIds={["gone", "file3"]}
+          searchQuery={null}
+          onSearchQueryChange={() => {}}
+        />,
+      );
+      expect(screen.getByText("Recent")).toBeInTheDocument();
+      expect(screen.getAllByText("file3.md").length).toBe(2);
+      expect(screen.queryByText("gone")).not.toBeInTheDocument();
+    });
+
+    it("collapses and expands", async () => {
+      const user = userEvent.setup();
+      render(
+        <Sidebar
+          groups={manyGroups}
+          activeGroup="default"
+          activeFileId="file5"
+          onFileSelect={() => {}}
+          onFilesReorder={() => {}}
+          viewMode="flat"
+          showTitle={false}
+          recentFileIds={["file3", "file1"]}
+          searchQuery={null}
+          onSearchQueryChange={() => {}}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: /recent/i }));
+      // Collapsed: only one row per file remains (the main list's).
+      expect(screen.getAllByText("file3.md")).toHaveLength(1);
+      await user.click(screen.getByRole("button", { name: /recent/i }));
+      expect(screen.getAllByText("file3.md")).toHaveLength(2);
+    });
+  });
+
+  describe("add-files button", () => {
+    function getFileInput(container: HTMLElement): HTMLInputElement {
+      const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+      expect(input).not.toBeNull();
+      return input!;
+    }
+
+    it("uploads picked files to the active group", async () => {
+      vi.mocked(uploadFile).mockResolvedValue(undefined);
+      const { container } = render(
+        <ToastProvider>
+          <Sidebar
+            groups={groups}
+            activeGroup="default"
+            activeFileId={null}
+            onFileSelect={() => {}}
+            onFilesReorder={() => {}}
+            viewMode="flat"
+            showTitle={false}
+            searchQuery={null}
+            onSearchQueryChange={() => {}}
+          />
+        </ToastProvider>,
+      );
+      fireEvent.change(getFileInput(container), {
+        target: { files: [new File(["# hello"], "note.md")] },
+      });
+      await waitFor(() => {
+        expect(uploadFile).toHaveBeenCalledWith("note.md", "# hello", "default");
+      });
+    });
+
+    it("uploads every picked file", async () => {
+      vi.mocked(uploadFile).mockResolvedValue(undefined);
+      const { container } = render(
+        <ToastProvider>
+          <Sidebar
+            groups={groups}
+            activeGroup="default"
+            activeFileId={null}
+            onFileSelect={() => {}}
+            onFilesReorder={() => {}}
+            viewMode="flat"
+            showTitle={false}
+            searchQuery={null}
+            onSearchQueryChange={() => {}}
+          />
+        </ToastProvider>,
+      );
+      fireEvent.change(getFileInput(container), {
+        target: { files: [new File(["a"], "a.md"), new File(["b"], "b.md")] },
+      });
+      await waitFor(() => {
+        expect(uploadFile).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    it("shows a toast when an upload fails", async () => {
+      vi.mocked(uploadFile).mockRejectedValueOnce(new Error("upload rejected"));
+      const { container } = render(
+        <ToastProvider>
+          <Sidebar
+            groups={groups}
+            activeGroup="default"
+            activeFileId={null}
+            onFileSelect={() => {}}
+            onFilesReorder={() => {}}
+            viewMode="flat"
+            showTitle={false}
+            searchQuery={null}
+            onSearchQueryChange={() => {}}
+          />
+        </ToastProvider>,
+      );
+      fireEvent.change(getFileInput(container), {
+        target: { files: [new File(["x"], "x.md")] },
+      });
+      expect(await screen.findByRole("alert")).toHaveTextContent("upload rejected");
+    });
+
+    it("skips files above the 10MB upload limit", async () => {
+      vi.mocked(uploadFile).mockResolvedValue(undefined);
+      const { container } = render(
+        <ToastProvider>
+          <Sidebar
+            groups={groups}
+            activeGroup="default"
+            activeFileId={null}
+            onFileSelect={() => {}}
+            onFilesReorder={() => {}}
+            viewMode="flat"
+            showTitle={false}
+            searchQuery={null}
+            onSearchQueryChange={() => {}}
+          />
+        </ToastProvider>,
+      );
+      const big = new File(["x"], "big.md");
+      Object.defineProperty(big, "size", { value: 10 * 1024 * 1024 + 1 });
+      fireEvent.change(getFileInput(container), { target: { files: [big] } });
+      expect(await screen.findByRole("alert")).toHaveTextContent("Skipped big.md");
+      expect(uploadFile).not.toHaveBeenCalled();
+    });
+
+    it("shows the button next to the search input when searching", () => {
+      render(
+        <Sidebar
+          groups={groups}
+          activeGroup="default"
+          activeFileId={null}
+          onFileSelect={() => {}}
+          onFilesReorder={() => {}}
+          viewMode="flat"
+          showTitle={false}
+          searchQuery=""
+          onSearchQueryChange={() => {}}
+        />,
+      );
+      expect(screen.getByRole("button", { name: "Add files" })).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("Search files...")).toBeInTheDocument();
+    });
   });
 });

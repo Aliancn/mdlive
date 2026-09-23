@@ -15,7 +15,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { FileEntry, Group, SearchResult } from "../hooks/useApi";
-import { removeFile, moveFile } from "../hooks/useApi";
+import { removeFile, moveFile, uploadFile } from "../hooks/useApi";
 import { buildFileUrl } from "../utils/groups";
 import { isPlainLeftClick } from "../utils/linkClick";
 import { escapeRegExp } from "../utils/regex";
@@ -29,6 +29,11 @@ const MIN_WIDTH = 180;
 const MAX_WIDTH = 480;
 const DEFAULT_WIDTH = 260;
 const STORAGE_KEY = "ml-sidebar-width";
+// With a short file list the whole list is on screen; the recently viewed
+// section only pays off once the list is long enough to hunt through.
+const RECENT_MIN_GROUP_FILES = 5;
+// Same limit as the server's upload endpoint and drag-and-drop.
+const MAX_UPLOAD_SIZE = 10 * 1024 * 1024;
 
 function getInitialWidth(): number {
   const stored = localStorage.getItem(STORAGE_KEY);
@@ -175,6 +180,8 @@ interface SidebarProps {
   onFilesReorder: (groupName: string, fileIds: string[]) => void;
   viewMode: ViewMode;
   showTitle: boolean;
+  /** Recently viewed file ids in this group, most recent first. */
+  recentFileIds?: string[];
   searchQuery: string | null;
   onSearchQueryChange: (query: string | null) => void;
   searchResults?: SearchResult[];
@@ -190,6 +197,7 @@ export function Sidebar({
   onFilesReorder,
   viewMode,
   showTitle,
+  recentFileIds = [],
   searchQuery,
   onSearchQueryChange,
   searchResults = [],
@@ -253,6 +261,7 @@ export function Sidebar({
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [contentMatchesOpen, setContentMatchesOpen] = useState(true);
   const [fileMatchesOpen, setFileMatchesOpen] = useState(true);
+  const [recentOpen, setRecentOpen] = useState(true);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const sensors = useSensors(
@@ -340,7 +349,42 @@ export function Sidebar({
       });
   }, [groups, activeGroup]);
 
+  // Recently viewed rows: only existing files of this group, minus the active
+  // one (its row is already highlighted in the list below).
+  const recentFiles = useMemo(() => {
+    if (isSearching || allFiles.length <= RECENT_MIN_GROUP_FILES) return [];
+    const byId = new Map(allFiles.map((f) => [f.id, f]));
+    return recentFileIds
+      .filter((id) => id !== activeFileId)
+      .map((id) => byId.get(id))
+      .filter((f): f is FileEntry => f != null);
+  }, [isSearching, allFiles, recentFileIds, activeFileId]);
+
   const showToast = useToast();
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFilesPicked = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const picked = e.target.files;
+      // Reset so picking the same file again fires another change event.
+      e.target.value = "";
+      if (!picked || picked.length === 0) return;
+      for (const file of Array.from(picked)) {
+        if (file.size > MAX_UPLOAD_SIZE) {
+          showToast(`Skipped ${file.name}: larger than 10MB`);
+          continue;
+        }
+        try {
+          const content = await file.text();
+          await uploadFile(file.name, content, activeGroup);
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : `Failed to upload ${file.name}`);
+        }
+      }
+    },
+    [activeGroup, showToast],
+  );
 
   const handleMoveToGroup = useCallback(
     async (id: string, group: string) => {
@@ -386,8 +430,8 @@ export function Sidebar({
       className="relative bg-gh-bg-sidebar border-r border-gh-border flex flex-col overflow-y-auto overscroll-contain shrink-0"
       style={{ width }}
     >
-      {searchOpen && (
-        <div className="px-2 pt-2 pb-1">
+      <div className={`flex items-center gap-1 px-2 pt-2 pb-1 ${searchOpen ? "" : "justify-end"}`}>
+        {searchOpen && (
           <input
             ref={searchInputRef}
             type="text"
@@ -397,11 +441,69 @@ export function Sidebar({
               if (e.key === "Escape") onSearchQueryChange(null);
             }}
             placeholder="Search files..."
-            className="w-full px-2 py-1.5 text-sm bg-gh-bg border border-gh-border rounded-md text-gh-text placeholder:text-gh-text-secondary outline-none focus:border-gh-accent"
+            className="min-w-0 flex-1 px-2 py-1.5 text-sm bg-gh-bg border border-gh-border rounded-md text-gh-text placeholder:text-gh-text-secondary outline-none focus:border-gh-accent"
           />
-        </div>
-      )}
+        )}
+        <button
+          type="button"
+          className="shrink-0 bg-transparent border border-gh-border rounded-md p-1.5 text-gh-text-secondary cursor-pointer transition-colors duration-150 hover:bg-gh-bg-hover"
+          onClick={() => fileInputRef.current?.click()}
+          aria-label="Add files"
+          title="Add files"
+        >
+          <svg
+            className="size-4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" d="M12 5v14M5 12h14" />
+          </svg>
+        </button>
+      </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFilesPicked}
+      />
       <nav className="flex flex-col pb-1">
+        {recentFiles.length > 0 && (
+          <>
+            <button
+              type="button"
+              className="flex w-full items-center justify-between px-3 pt-2 pb-1 text-left text-xs font-semibold uppercase tracking-wide text-gh-text-secondary"
+              onClick={() => setRecentOpen((v) => !v)}
+              aria-expanded={recentOpen}
+            >
+              <span>Recent</span>
+              <span className="text-sm leading-none">{recentOpen ? "−" : "+"}</span>
+            </button>
+            {recentOpen &&
+              recentFiles.map((f) => (
+                <FileItem
+                  key={f.id}
+                  file={f}
+                  activeGroup={activeGroup}
+                  isActive={f.id === activeFileId}
+                  showTitle={showTitle}
+                  directory={duplicatedNames.has(f.name) ? parentDirectory(f) : ""}
+                  menuOpenId={menuOpenId}
+                  otherGroups={otherGroups}
+                  onFileSelect={onFileSelect}
+                  onMenuToggle={handleMenuToggle}
+                  onOpenInNewTab={handleOpenInNewTab}
+                  onCopyPath={handleCopyPath}
+                  onCopyLink={handleCopyLink}
+                  onMoveToGroup={handleMoveToGroup}
+                  onRemove={handleRemove}
+                  menuRef={menuRef}
+                />
+              ))}
+          </>
+        )}
         {isSearching ? (
           <>
             {searchLoading ? (
@@ -549,6 +651,11 @@ export function Sidebar({
           </DndContext>
         )}
       </nav>
+      {allFiles.length > 0 && (
+        <div className="mt-auto border-t border-gh-border px-3 py-1.5 text-xs text-gh-text-secondary">
+          {allFiles.length === 1 ? "1 file" : `${allFiles.length} files`}
+        </div>
+      )}
       {/* Resize handle */}
       <div
         className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-gh-border active:bg-gh-border transition-colors"
