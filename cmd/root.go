@@ -73,6 +73,8 @@ var (
 	recursive                    bool
 	closeFiles                   bool
 	clearBackup                  bool
+	pruneMode                    bool
+	pruneBackups                 bool
 	jsonOutput                   bool
 	dangerouslyAllowRemoteAccess bool
 	reloadMode                   bool
@@ -239,6 +241,8 @@ func init() {
 	rootCmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "Recurse into subdirectories when a directory is given")
 	rootCmd.Flags().BoolVar(&closeFiles, "close", false, "Close files instead of opening them")
 	rootCmd.Flags().BoolVar(&clearBackup, "clear", false, "Clear saved session for the specified port")
+	rootCmd.Flags().BoolVar(&pruneMode, "prune", false, "Remove log files of servers that are no longer running")
+	rootCmd.Flags().BoolVar(&pruneBackups, "prune-backups", false, "With --prune, also remove saved sessions of stopped servers (asks for confirmation)")
 	rootCmd.Flags().BoolVar(&reloadMode, "reload", false, "Re-apply .mlignore and --exclude rules to patterns registered from the current directory")
 	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output structured data as JSON to stdout")
 	rootCmd.Flags().BoolVar(&dangerouslyAllowRemoteAccess, "dangerously-allow-remote-access", false, "Allow remote access without authentication. Recommended only for trusted networks.")
@@ -248,7 +252,13 @@ func init() {
 }
 
 func run(cmd *cobra.Command, args []string) (retErr error) {
-	if !foreground || restore != "" {
+	// Client-only verbs talk to an existing server (or the filesystem) and
+	// never run one; giving each of them a rotating log file would create a
+	// phantom entry that --status then reports as a stale server. Their
+	// warnings go to stderr, where the user is looking anyway.
+	clientOnly := clearBackup || statusServer || shutdownServer || restartServer ||
+		unwatchMode || closeFiles || pruneMode || reloadMode
+	if (!foreground || restore != "") && !clientOnly {
 		logCleanup, err := logfile.Setup(port)
 		if err != nil {
 			slog.Warn("failed to setup log file, using stderr", "error", err)
@@ -324,6 +334,19 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 			fmt.Fprintf(os.Stderr, "ml: cleared saved session for port %d\n", port)
 		}
 		return nil
+	}
+
+	if pruneBackups && !pruneMode {
+		return fmt.Errorf("cannot use --prune-backups without --prune")
+	}
+	if pruneMode {
+		if watchMode {
+			return fmt.Errorf("cannot use --prune with --watch")
+		}
+		if len(args) > 0 {
+			return fmt.Errorf("cannot use --prune with file arguments")
+		}
+		return doPrune()
 	}
 
 	if statusServer {
@@ -1069,7 +1092,11 @@ type jsonStatusEntry struct {
 	PID      int                    `json:"pid,omitempty"`
 	Version  string                 `json:"version,omitempty"`
 	Revision string                 `json:"revision,omitempty"`
+	App      string                 `json:"app,omitempty"`
+	Legacy   bool                   `json:"legacy,omitempty"`
+	Stale    bool                   `json:"stale,omitempty"`
 	Groups   []jsonStatusGroupEntry `json:"groups,omitempty"`
+	Watcher  *server.WatcherStatus  `json:"watcher,omitempty"`
 }
 
 func writeJSON(v any) {
@@ -1614,10 +1641,12 @@ type statusGroupEntry struct {
 }
 
 type statusResponse struct {
-	Version  string             `json:"version"`
-	Revision string             `json:"revision"`
-	PID      int                `json:"pid"`
-	Groups   []statusGroupEntry `json:"groups"`
+	Version  string               `json:"version"`
+	Revision string               `json:"revision"`
+	App      string               `json:"app"`
+	PID      int                  `json:"pid"`
+	Groups   []statusGroupEntry   `json:"groups"`
+	Watcher  server.WatcherStatus `json:"watcher"`
 }
 
 func doStatus() error {
@@ -1640,13 +1669,16 @@ func doStatus() error {
 		resp, err := client.Get(fmt.Sprintf("http://%s/_/api/status", addr))
 		if err != nil {
 			found = true
+			// discoverPorts derives the list from log files, so a port that
+			// does not answer has a leftover log of a server that is gone.
 			if jsonOutput {
 				jsonEntries = append(jsonEntries, jsonStatusEntry{
 					URL:    fmt.Sprintf("http://%s", addr),
 					Status: "stopped",
+					Stale:  true,
 				})
 			} else {
-				fmt.Fprintf(os.Stdout, "http://%s (stopped)\n", addr)
+				fmt.Fprintf(os.Stdout, "http://%s (stale: no server; log file left over — run ml --prune)\n", addr)
 				if i < len(ports)-1 {
 					fmt.Fprintln(os.Stdout)
 				}
@@ -1662,6 +1694,12 @@ func doStatus() error {
 		resp.Body.Close()
 		found = true
 
+		// The port answers but is not ml (ml reports app="ml" since 0.2.0).
+		// Without an app field it is either an older ml or a program with a
+		// compatible status API — report it either way.
+		foreign := status.App != "" && status.App != server.AppName
+		legacy := status.App == ""
+
 		if jsonOutput {
 			entry := jsonStatusEntry{
 				URL:      fmt.Sprintf("http://%s", addr),
@@ -1669,6 +1707,12 @@ func doStatus() error {
 				PID:      status.PID,
 				Version:  status.Version,
 				Revision: status.Revision,
+				App:      status.App,
+				Legacy:   legacy,
+			}
+			if status.Watcher.Status != "" {
+				watcher := status.Watcher
+				entry.Watcher = &watcher
 			}
 			for _, g := range status.Groups {
 				entry.Groups = append(entry.Groups, jsonStatusGroupEntry{
@@ -1679,12 +1723,21 @@ func doStatus() error {
 				})
 			}
 			jsonEntries = append(jsonEntries, entry)
+		} else if foreign {
+			fmt.Fprintf(os.Stdout, "http://%s (not ml: app=%s version=%s — use --port)\n", addr, status.App, status.Version)
+			if i < len(ports)-1 {
+				fmt.Fprintln(os.Stdout)
+			}
 		} else {
 			ver := status.Version
 			if status.Revision != "" {
 				ver += " " + status.Revision
 			}
-			fmt.Fprintf(os.Stdout, "http://%s (pid %d, %s)\n", addr, status.PID, ver)
+			fmt.Fprintf(os.Stdout, "http://%s (pid %d, %s)", addr, status.PID, ver)
+			if legacy {
+				fmt.Fprint(os.Stdout, " (no app field; ml <=0.1.0 or upstream mo)")
+			}
+			fmt.Fprintln(os.Stdout)
 			for _, g := range status.Groups {
 				fmt.Fprintf(os.Stdout, "  %s: %d file(s)\n", g.Name, len(g.Files))
 				if len(g.Patterns) > 0 {
@@ -1704,6 +1757,7 @@ func doStatus() error {
 					fmt.Fprintf(os.Stdout, "    excluding: %s\n", detail)
 				}
 			}
+			printWatcherLine(&status.Watcher)
 			if i < len(ports)-1 {
 				fmt.Fprintln(os.Stdout)
 			}
@@ -1749,6 +1803,135 @@ func discoverPorts() []int {
 	}
 	sort.Ints(ports)
 	return ports
+}
+
+// printWatcherLine renders the watcher health of a running server under the
+// group listing. Servers older than the watcher API report nothing.
+func printWatcherLine(w *server.WatcherStatus) {
+	if w == nil || w.Status == "" {
+		return
+	}
+	if w.Status != "degraded" {
+		fmt.Fprintf(os.Stdout, "    watcher: %s — %d root, %d dir, %d file\n", w.Status, w.Roots, w.DirWatches, w.FileWatches)
+		return
+	}
+	line := fmt.Sprintf("    watcher: degraded — %d failed registration(s)", w.Failed)
+	if w.PendingRetries > 0 {
+		line += fmt.Sprintf(", %d retry(s) pending", w.PendingRetries)
+	}
+	if w.LastError != "" {
+		line += " (last: " + w.LastError
+		if w.LastErrorPath != "" {
+			line += " at " + w.LastErrorPath
+		}
+		line += ")"
+	}
+	fmt.Fprintln(os.Stdout, line)
+}
+
+// jsonPruneResult is the --json shape of ml --prune.
+type jsonPruneResult struct {
+	// Logs lists the removed log file names (rotations included).
+	Logs []string `json:"logs"`
+	// Backups lists the ports whose saved sessions were removed.
+	Backups []int `json:"backups"`
+	// Kept lists the ports of servers still running.
+	Kept []int `json:"kept"`
+}
+
+// doPrune removes log files left behind by servers that no longer answer.
+// Saved sessions of pruned ports are reported by default and only removed
+// with --prune-backups, after the same confirmation --clear uses.
+func doPrune() error {
+	dir, err := logfile.Dir()
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintln(os.Stderr, "ml: nothing to prune")
+			return nil
+		}
+		return err
+	}
+
+	// Group every log file (rotations included) by port.
+	filesByPort := map[int][]string{}
+	for _, e := range entries {
+		name := e.Name()
+		idx := strings.Index(name, ".log")
+		if !strings.HasPrefix(name, "ml-") || idx < 0 {
+			continue
+		}
+		p, err := strconv.Atoi(name[len("ml-"):idx])
+		if err != nil {
+			continue
+		}
+		filesByPort[p] = append(filesByPort[p], name)
+	}
+	ports := make([]int, 0, len(filesByPort))
+	for p := range filesByPort {
+		ports = append(ports, p)
+	}
+	sort.Ints(ports)
+
+	result := jsonPruneResult{Logs: []string{}, Backups: []int{}, Kept: []int{}}
+	prunedFiles, keptServers := 0, 0
+	for _, p := range ports {
+		addr := fmt.Sprintf("localhost:%d", p)
+		_, err := probeServer(addr, probeTimeoutFast)
+		running := err == nil
+		if running {
+			keptServers++
+			result.Kept = append(result.Kept, p)
+			if !jsonOutput {
+				fmt.Fprintf(os.Stderr, "ml: kept logs of running server on %s\n", addr)
+			}
+			continue
+		}
+		// A foreign server occupying the port does not use ml's log file,
+		// so the log is stale either way.
+		for _, name := range filesByPort[p] {
+			if rmErr := os.Remove(filepath.Join(dir, name)); rmErr != nil {
+				slog.Warn("failed to remove stale log file", "file", name, "error", rmErr)
+				continue
+			}
+			prunedFiles++
+			result.Logs = append(result.Logs, name)
+		}
+		if backup.Exists(p) {
+			if !pruneBackups {
+				fmt.Fprintf(os.Stderr, "ml: kept saved session for port %d (use --prune-backups to remove)\n", p)
+			} else if confirmRemove(fmt.Sprintf("remove saved session for port %d", p)) {
+				if rmErr := backup.Remove(p); rmErr != nil {
+					slog.Warn("failed to remove saved session", "port", p, "error", rmErr)
+				} else {
+					result.Backups = append(result.Backups, p)
+				}
+			}
+		}
+	}
+
+	if jsonOutput {
+		writeJSON(result)
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "ml: pruned %d stale log file(s); kept %d running server(s)\n", prunedFiles, keptServers)
+	return nil
+}
+
+// confirmRemove asks the user a yes/no question on the terminal, sharing the
+// wording of the --clear confirmation.
+func confirmRemove(action string) bool {
+	fmt.Fprintf(os.Stderr, "ml: %s? [Y/n] ", action)
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		fmt.Fprintln(os.Stderr, "ml: canceled")
+		return false
+	}
+	ans := strings.TrimSpace(scanner.Text())
+	return ans == "" || strings.EqualFold(ans, "y") || strings.EqualFold(ans, "yes")
 }
 
 func startServer(ctx context.Context, addr string, filesByGroup map[string][]string, specsByGroup map[string][]patternSpec, uploadedFiles []server.UploadedFileData) error {

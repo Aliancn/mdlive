@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1912,4 +1914,262 @@ func TestReload_RulesResolution(t *testing.T) {
 			t.Fatalf("rules includeHidden = %v, want true (flag given)", rules["includeHidden"])
 		}
 	})
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		defer func() {
+			if err := r.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		b, err := io.ReadAll(r)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- string(b)
+	}()
+	fn()
+	os.Stdout = oldStdout
+	w.Close()
+	return <-done
+}
+
+// fakeLogDir points XDG_STATE_HOME at a fresh directory and returns the log
+// directory inside it plus the state root (for the backup directory).
+func fakeLogDir(t *testing.T) (string, string) {
+	t.Helper()
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	dir := filepath.Join(state, "ml", "log")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir, state
+}
+
+func TestRun_ClientCommandsDoNotCreateLogFile(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func()
+		args  []string
+	}{
+		{"status", func() { statusServer = true }, nil},
+		{"prune", func() { pruneMode = true }, nil},
+		{"reload without server", func() { reloadMode = true }, nil},
+		{"shutdown dead port", func() { shutdownServer = true }, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logDir, _ := fakeLogDir(t)
+			tt.setup()
+			defer func() {
+				statusServer, pruneMode, reloadMode, shutdownServer = false, false, false, false
+			}()
+
+			// The command may fail (nothing to talk to) — that is fine; the
+			// point is that no log file is created along the way.
+			if runErr := run(rootCmd, tt.args); runErr != nil {
+				t.Logf("run failed as expected without a server: %v", runErr)
+			}
+
+			entries, err := os.ReadDir(logDir)
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return
+				}
+				t.Fatal(err)
+			}
+			if len(entries) > 0 {
+				t.Fatalf("client-only command created log files: %v", entries)
+			}
+		})
+	}
+}
+
+func TestPrune_StaleLogsRemoved(t *testing.T) {
+	logDir, stateDir := fakeLogDir(t)
+
+	// A running server keeps its logs.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_/api/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"version": "0.2.0", "app": "ml", "pid": 1}) //nolint:errcheck
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	alivePort, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(ts.URL, "http://127.0.0.1:"), ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string) {
+		if err := os.WriteFile(filepath.Join(logDir, name), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(fmt.Sprintf("ml-%d.log", alivePort))
+	write("ml-26999.log")
+	write("ml-26998.log.1") // rotation of a dead port
+
+	// 26997 has a saved session that must only be reported, not removed.
+	backupDir := filepath.Join(stateDir, "ml", "backup")
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeBackup := filepath.Join(backupDir, "ml-26997.json")
+	if err := os.WriteFile(writeBackup, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// And its log, so the port is visited at all.
+	write("ml-26997.log")
+
+	out := captureStderr(t, func() {
+		if err := doPrune(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	if _, err := os.Stat(filepath.Join(logDir, fmt.Sprintf("ml-%d.log", alivePort))); err != nil {
+		t.Fatalf("log of running server was removed: %v", err)
+	}
+	for _, name := range []string{"ml-26999.log", "ml-26998.log.1"} {
+		if _, err := os.Stat(filepath.Join(logDir, name)); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("%s was not removed: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(writeBackup); err != nil {
+		t.Fatalf("saved session removed without --prune-backups: %v", err)
+	}
+	if !strings.Contains(out, "use --prune-backups to remove") {
+		t.Fatalf("stderr %q lacks the saved-session hint", out)
+	}
+	if !strings.Contains(out, "pruned 3 stale log file(s)") {
+		t.Fatalf("stderr %q lacks the summary", out)
+	}
+}
+
+func TestPrune_BackupsWithConfirmation(t *testing.T) {
+	logDir, stateDir := fakeLogDir(t)
+	backupDir := filepath.Join(stateDir, "ml", "backup")
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backupPath := filepath.Join(backupDir, "ml-26997.json")
+	if err := os.WriteFile(backupPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "ml-26997.log"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Feed "y" to the confirmation prompt.
+	pruneBackups = true
+	defer func() { pruneBackups = false }()
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.WriteString("y\n"); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	defer func() {
+		os.Stdin = oldStdin
+		r.Close() //nolint:errcheck
+	}()
+
+	out := captureStderr(t, func() {
+		if err := doPrune(); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := os.Stat(backupPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("saved session not removed despite confirmation: %v", err)
+	}
+	if !strings.Contains(out, "remove saved session for port 26997") {
+		t.Fatalf("stderr %q lacks the confirmation prompt", out)
+	}
+}
+
+func TestDoStatus_MarksStaleForeignAndWatcher(t *testing.T) {
+	logDir, _ := fakeLogDir(t)
+
+	healthy := httptest.NewServer(newStatusMux(map[string]any{
+		"version": "0.2.0", "app": "ml", "pid": 11,
+		"watcher": map[string]any{"status": "degraded", "failed": 2, "pendingRetries": 2,
+			"lastError": "FSEventStreamStart failed", "lastErrorPath": "/repo/link"},
+	}))
+	defer healthy.Close()
+	foreign := httptest.NewServer(newStatusMux(map[string]any{
+		"version": "1.6.8", "app": "mo", "pid": 12,
+	}))
+	defer foreign.Close()
+	legacy := httptest.NewServer(newStatusMux(map[string]any{
+		"version": "0.1.0", "pid": 13,
+	}))
+	defer legacy.Close()
+
+	portOf := func(url string) int {
+		t.Helper()
+		p, err := strconv.Atoi(url[strings.LastIndex(url, ":")+1:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// A stale port: a log file with no listener behind it.
+	stalePort := 26995
+
+	for _, tc := range []struct {
+		port  int
+		label string
+	}{
+		{portOf(healthy.URL), "ml-%d.log"},
+		{portOf(foreign.URL), "ml-%d.log"},
+		{portOf(legacy.URL), "ml-%d.log"},
+		{stalePort, "ml-%d.log"},
+	} {
+		if err := os.WriteFile(filepath.Join(logDir, fmt.Sprintf(tc.label, tc.port)), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out := captureStdout(t, func() {
+		if err := doStatus(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	if !strings.Contains(out, "stale: no server; log file left over") {
+		t.Fatalf("output lacks the stale marking:\n%s", out)
+	}
+	if !strings.Contains(out, "not ml: app=mo version=1.6.8") {
+		t.Fatalf("output lacks the foreign marking:\n%s", out)
+	}
+	if !strings.Contains(out, "no app field; ml <=0.1.0 or upstream mo") {
+		t.Fatalf("output lacks the legacy marking:\n%s", out)
+	}
+	if !strings.Contains(out, "watcher: degraded — 2 failed registration(s), 2 retry(s) pending (last: FSEventStreamStart failed at /repo/link)") {
+		t.Fatalf("output lacks the degraded watcher line:\n%s", out)
+	}
+}
+
+// newStatusMux serves GET /_/api/status with the given JSON body.
+func newStatusMux(status map[string]any) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_/api/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(status) //nolint:errcheck
+	})
+	return mux
 }
