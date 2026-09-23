@@ -1970,8 +1970,14 @@ func TestRun_ClientCommandsDoNotCreateLogFile(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logDir, _ := fakeLogDir(t)
+			// Isolate the port as well: these commands probe the default
+			// port, and a "dead" one may well be a locally running ml
+			// session — "shutdown" would then POST to it for real.
+			oldPort := port
+			port = freePort(t)
 			tt.setup()
 			defer func() {
+				port = oldPort
 				statusServer, pruneMode, reloadMode, shutdownServer = false, false, false, false
 			}()
 
