@@ -2,7 +2,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Sidebar } from "./Sidebar";
+import { moveFile } from "../hooks/useApi";
 import type { Group, SearchResult } from "../hooks/useApi";
+import { ToastProvider } from "./Toast";
+
+vi.mock("../hooks/useApi", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../hooks/useApi")>();
+  return { ...actual, moveFile: vi.fn() };
+});
 
 const groups: Group[] = [
   {
@@ -354,6 +361,33 @@ describe("Sidebar", () => {
     expect(screen.getByText("Content matches")).toBeInTheDocument();
     expect(screen.getByText("Line 3")).toBeInTheDocument();
     expect(screen.getByText(hasTextContent("cache line"))).toBeInTheDocument();
+  });
+
+  it("shows a toast instead of an alert when moving a file fails", async () => {
+    const user = userEvent.setup();
+    const alertSpy = vi.spyOn(window, "alert");
+    vi.mocked(moveFile).mockRejectedValueOnce(new Error("group not found"));
+    render(
+      <ToastProvider>
+        <Sidebar
+          groups={groups}
+          activeGroup="default"
+          activeFileId="aaa11111"
+          onFileSelect={() => {}}
+          onFilesReorder={() => {}}
+          viewMode="flat"
+          showTitle={false}
+          searchQuery={null}
+          onSearchQueryChange={() => {}}
+        />
+      </ToastProvider>,
+    );
+
+    await user.click(screen.getAllByTitle("More actions")[0]);
+    await user.click(screen.getByRole("button", { name: "docs" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("group not found");
+    expect(alertSpy).not.toHaveBeenCalled();
   });
 
   it("toggles content matches section", async () => {

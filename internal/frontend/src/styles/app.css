@@ -17,6 +17,10 @@
   --color-gh-attention-border: #d4a72c;
   --color-gh-attention-text: #1f2328;
   --color-gh-attention-icon: #9a6700;
+  /* GitHub "danger" palette, for error toasts. */
+  --color-gh-danger-bg: #ffebe9;
+  --color-gh-danger-border: #ff8182;
+  --color-gh-danger-text: #d1242f;
 }
 
 [data-theme="light"] {
@@ -40,6 +44,9 @@
   --color-gh-attention-border: #9e6a03;
   --color-gh-attention-text: #e6edf3;
   --color-gh-attention-icon: #d4a72c;
+  --color-gh-danger-bg: #f851491a;
+  --color-gh-danger-border: #f8514966;
+  --color-gh-danger-text: #f85149;
 }
 
 /* Shiki renders both themes in one pass: the inline colors are
