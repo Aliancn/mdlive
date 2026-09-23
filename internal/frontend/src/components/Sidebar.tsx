@@ -38,6 +38,17 @@ function getInitialWidth(): number {
   return DEFAULT_WIDTH;
 }
 
+// Files in different directories can share a name; a row with a duplicate
+// name shows its directory as a second line so duplicates can be told apart
+// at a glance. Tree view already provides the directory context.
+function parentDirectory(file: FileEntry): string {
+  if (file.uploaded) return "";
+  if (file.segments && file.segments.length > 1) {
+    return file.segments.slice(0, -1).join("/");
+  }
+  return "";
+}
+
 function renderHighlightedText(text: string, query: string) {
   if (!query) {
     return text;
@@ -60,6 +71,8 @@ interface FileItemProps {
   activeGroup: string;
   isActive: boolean;
   showTitle: boolean;
+  /** Parent directory, shown as a second line when the name is duplicated. */
+  directory?: string;
   menuOpenId: string | null;
   otherGroups: Group[];
   onFileSelect: (id: string) => void;
@@ -77,6 +90,7 @@ function FileItem({
   activeGroup,
   isActive,
   showTitle,
+  directory,
   menuOpenId,
   otherGroups,
   onFileSelect,
@@ -106,8 +120,15 @@ function FileItem({
         aria-current={isActive ? "page" : undefined}
       >
         <FileIcon uploaded={file.uploaded} />
-        <span className="overflow-hidden text-ellipsis whitespace-nowrap pr-6">
-          {(showTitle && file.title) || file.name}
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="overflow-hidden text-ellipsis whitespace-nowrap pr-6">
+            {(showTitle && file.title) || file.name}
+          </span>
+          {directory && (
+            <span className="overflow-hidden text-ellipsis whitespace-nowrap pr-6 text-xs text-gh-text-secondary">
+              {directory}
+            </span>
+          )}
         </span>
       </a>
       <FileContextMenu
@@ -177,6 +198,20 @@ export function Sidebar({
     const currentGroup = groups.find((g) => g.name === activeGroup);
     return currentGroup?.files ?? [];
   }, [groups, activeGroup]);
+
+  // Names that appear more than once in the group; their rows show the
+  // parent directory as a second line.
+  const duplicatedNames = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const f of allFiles) {
+      counts.set(f.name, (counts.get(f.name) ?? 0) + 1);
+    }
+    const duplicated = new Set<string>();
+    for (const [name, count] of counts) {
+      if (count > 1) duplicated.add(name);
+    }
+    return duplicated;
+  }, [allFiles]);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const searchOpen = searchQuery != null;
@@ -443,6 +478,7 @@ export function Sidebar({
                       activeGroup={activeGroup}
                       isActive={f.id === activeFileId}
                       showTitle={showTitle}
+                      directory={duplicatedNames.has(f.name) ? parentDirectory(f) : ""}
                       menuOpenId={menuOpenId}
                       otherGroups={otherGroups}
                       onFileSelect={onFileSelect}
@@ -492,6 +528,7 @@ export function Sidebar({
                   activeGroup={activeGroup}
                   isActive={f.id === activeFileId}
                   showTitle={showTitle}
+                  directory={duplicatedNames.has(f.name) ? parentDirectory(f) : ""}
                   menuOpenId={menuOpenId}
                   otherGroups={otherGroups}
                   onFileSelect={onFileSelect}

@@ -404,6 +404,53 @@ describe("Sidebar", () => {
     Element.prototype.scrollIntoView = original;
   });
 
+  it("shows the directory for duplicate file names in flat view", () => {
+    const dupGroups: Group[] = [
+      {
+        name: "default",
+        files: [
+          {
+            id: "dup1",
+            name: "README.md",
+            path: "/a/README.md",
+            segments: ["a", "README.md"],
+          },
+          {
+            id: "dup2",
+            name: "README.md",
+            path: "/b/README.md",
+            segments: ["b", "README.md"],
+          },
+          {
+            id: "uniq",
+            name: "GUIDE.md",
+            path: "/a/GUIDE.md",
+            segments: ["a", "GUIDE.md"],
+          },
+        ],
+      },
+    ];
+    render(
+      <Sidebar
+        groups={dupGroups}
+        activeGroup="default"
+        activeFileId={null}
+        onFileSelect={() => {}}
+        onFilesReorder={() => {}}
+        viewMode="flat"
+        showTitle={false}
+        searchQuery={null}
+        onSearchQueryChange={() => {}}
+      />,
+    );
+    expect(screen.getAllByText("README.md")).toHaveLength(2);
+    // Duplicate rows show their directory as a second line...
+    expect(screen.getByText("a")).toBeInTheDocument();
+    expect(screen.getByText("b")).toBeInTheDocument();
+    // ...unique names do not.
+    expect(screen.getByText("GUIDE.md").closest("a")?.textContent).toBe("GUIDE.md");
+  });
+
   it("expands collapsed ancestors of the active file in tree view", () => {
     const nestedGroups: Group[] = [
       {
