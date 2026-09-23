@@ -204,8 +204,28 @@ Excluding files:
   anchored at the working directory. '!'-prefixed lines re-include
   files, and the last matching line wins. Files already shown in the
   sidebar are never removed by excludes. Registered rules are shown by
-  --status and updated by re-running ml with the new flags (or via
-  ml --clear).
+  --status and applied to already-registered patterns with ml --reload.
+
+Applying rule changes:
+  Editing .mlignore (or passing new --exclude flags) does not change
+  what is already in the sidebar until the rules are re-applied.
+
+  $ ml --reload                       Re-read .mlignore and re-apply rules
+  $ ml --reload --exclude 'new/**'    Also swap in new --exclude flags
+
+  Files the new rules no longer admit are removed from the sidebar;
+  explicitly named files are never removed. Patterns registered from
+  another directory are skipped (run ml --reload from there).
+
+Housekeeping:
+  ml keeps a rotating log and a saved session per port under
+  $XDG_STATE_HOME/ml/. Client-only commands (--status, --shutdown, ...)
+  do not create log files. Servers that exited without --shutdown leave
+  both behind; ml --prune removes the logs of ports that no longer
+  answer (kept saved sessions are only removed with --prune-backups).
+
+  $ ml --prune                        Remove stale log files
+  $ ml --prune --prune-backups        Also remove saved sessions (asks)
 
 WARNING: --bind with a non-loopback address:
   Binding to a non-localhost address (e.g. 0.0.0.0) exposes ml to the
