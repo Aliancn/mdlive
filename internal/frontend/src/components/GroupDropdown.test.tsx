@@ -19,6 +19,15 @@ const designGroup: Group = {
   files: [{ id: "ccc33333", name: "c.md", path: "/c.md" }],
 };
 
+const multiFileGroup: Group = {
+  name: "notes",
+  files: [
+    { id: "ddd44444", name: "d1.md", path: "/d1.md" },
+    { id: "eee55555", name: "d2.md", path: "/d2.md" },
+    { id: "fff66666", name: "d3.md", path: "/d3.md" },
+  ],
+};
+
 describe("GroupDropdown", () => {
   it("renders nothing for a single default group", () => {
     const { container } = render(
@@ -103,5 +112,20 @@ describe("GroupDropdown", () => {
     await user.click(screen.getByText("docs"));
     // After selection, dropdown items should be gone; only the trigger button remains
     expect(screen.queryByText("(default)")).not.toBeInTheDocument();
+  });
+
+  it("shows the file count per group", async () => {
+    const user = userEvent.setup();
+    render(
+      <GroupDropdown
+        groups={[defaultGroup, docsGroup, multiFileGroup]}
+        activeGroup="default"
+        onGroupChange={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button"));
+    expect(screen.getByText("(default)").closest("button")?.textContent).toContain("1");
+    expect(screen.getByText("notes").closest("button")?.textContent).toContain("3");
   });
 });

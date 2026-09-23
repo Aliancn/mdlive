@@ -130,6 +130,7 @@ export function GroupDropdown({ groups, activeGroup, onGroupChange }: GroupDropd
                   <span className="overflow-hidden text-ellipsis whitespace-nowrap">
                     {g.name === "default" ? "(default)" : g.name}
                   </span>
+                  <span className="ml-auto shrink-0 tabular-nums">{g.files.length}</span>
                 </button>
               ))}
           </div>

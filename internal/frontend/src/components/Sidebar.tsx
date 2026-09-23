@@ -601,6 +601,11 @@ export function Sidebar({
           </DndContext>
         )}
       </nav>
+      {allFiles.length > 0 && (
+        <div className="mt-auto border-t border-gh-border px-3 py-1.5 text-xs text-gh-text-secondary">
+          {allFiles.length === 1 ? "1 file" : `${allFiles.length} files`}
+        </div>
+      )}
       {/* Resize handle */}
       <div
         className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-gh-border active:bg-gh-border transition-colors"

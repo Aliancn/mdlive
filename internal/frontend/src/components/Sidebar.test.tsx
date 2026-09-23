@@ -214,6 +214,58 @@ describe("Sidebar", () => {
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
+  it("shows the total file count in a footer", () => {
+    render(
+      <Sidebar
+        groups={groups}
+        activeGroup="default"
+        activeFileId={null}
+        onFileSelect={() => {}}
+        onFilesReorder={() => {}}
+        viewMode="flat"
+        showTitle={false}
+        searchQuery={null}
+        onSearchQueryChange={() => {}}
+      />,
+    );
+    expect(screen.getByText("2 files")).toBeInTheDocument();
+  });
+
+  it("uses the singular form for a single file", () => {
+    render(
+      <Sidebar
+        groups={groups}
+        activeGroup="docs"
+        activeFileId={null}
+        onFileSelect={() => {}}
+        onFilesReorder={() => {}}
+        viewMode="flat"
+        showTitle={false}
+        searchQuery={null}
+        onSearchQueryChange={() => {}}
+      />,
+    );
+    expect(screen.getByText("1 file")).toBeInTheDocument();
+  });
+
+  it("hides the footer for an empty group", () => {
+    const emptyGroups: Group[] = [{ name: "empty", files: [] }];
+    render(
+      <Sidebar
+        groups={emptyGroups}
+        activeGroup="empty"
+        activeFileId={null}
+        onFileSelect={() => {}}
+        onFilesReorder={() => {}}
+        viewMode="flat"
+        showTitle={false}
+        searchQuery={null}
+        onSearchQueryChange={() => {}}
+      />,
+    );
+    expect(screen.queryByText("0 files")).not.toBeInTheDocument();
+  });
+
   it("shows search input when searchQuery is non-null", () => {
     render(
       <Sidebar
