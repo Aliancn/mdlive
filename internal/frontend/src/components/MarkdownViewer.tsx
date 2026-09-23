@@ -78,6 +78,12 @@ function urlTransform(url: string, key: string): string {
   return defaultUrlTransform(url);
 }
 
+// Both themes are rendered in one pass: the inline colors are the light
+// theme, and the dark colors ride along as --shiki-dark CSS variables that
+// app.css applies under [data-theme="dark"]. Toggling the theme therefore
+// needs no re-highlight.
+const SHIKI_THEMES = { light: "github-light", dark: "github-dark" } as const;
+
 interface MarkdownViewerProps {
   fileId: string;
   fileName: string;
@@ -469,14 +475,14 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    codeToHtml(code, { lang: language, theme: "github-dark" })
+    codeToHtml(code, { lang: language, themes: SHIKI_THEMES })
       .then((result) => {
         if (!cancelled) setHtml(result);
       })
       .catch(() => {
         // Fallback: if language not supported, try plaintext
         if (!cancelled) {
-          codeToHtml(code, { lang: "text", theme: "github-dark" })
+          codeToHtml(code, { lang: "text", themes: SHIKI_THEMES })
             .then((result) => {
               if (!cancelled) setHtml(result);
             })
@@ -525,13 +531,13 @@ function HighlightedView({ content, language }: { content: string; language: str
   useEffect(() => {
     let cancelled = false;
     setHtml("");
-    codeToHtml(content, { lang: language, theme: "github-dark" })
+    codeToHtml(content, { lang: language, themes: SHIKI_THEMES })
       .then((result) => {
         if (!cancelled) setHtml(result);
       })
       .catch(() => {
         if (!cancelled) {
-          codeToHtml(content, { lang: "text", theme: "github-dark" })
+          codeToHtml(content, { lang: "text", themes: SHIKI_THEMES })
             .then((result) => {
               if (!cancelled) setHtml(result);
             })

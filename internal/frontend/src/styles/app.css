@@ -42,6 +42,19 @@
   --color-gh-attention-icon: #d4a72c;
 }
 
+/* Shiki renders both themes in one pass: the inline colors are
+   github-light, and the dark colors ride along as --shiki-dark
+   variables. Apply them when the dark theme is active (overrides the
+   inline styles, hence !important). */
+[data-theme="dark"] .shiki {
+  color: var(--shiki-dark) !important;
+  background-color: var(--shiki-dark-bg) !important;
+}
+
+[data-theme="dark"] .shiki span {
+  color: var(--shiki-dark) !important;
+}
+
 html,
 body,
 #root {
