@@ -1,10 +1,15 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fswatcher/fswatcher"
 )
@@ -58,6 +63,9 @@ func (s *State) addRootWatch(dir string) {
 	}
 	if err := s.watcher.AddRecursive(target, watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
 		slog.Warn("failed to watch directory tree", "root", dir, "target", target, "error", err)
+		s.recordWatchFailureLocked(watchKindRoot, target, err)
+	} else {
+		s.clearWatchFailureLocked(watchKindRoot, target)
 	}
 	s.registerPathAlias(dir, canonical)
 }
@@ -113,6 +121,7 @@ func (s *State) physicallyReleaseRootLocked(target string) {
 	if s.watcher == nil {
 		return
 	}
+	s.cancelWatchRetryLocked(watchKindRoot, target)
 	if err := s.watcher.Remove(target); err != nil && !errors.Is(err, fswatcher.ErrNotAdded) {
 		slog.Warn("failed to remove directory-tree watch", "target", target, "error", err)
 	}
@@ -132,6 +141,7 @@ func (s *State) sweepRetainedRootsLocked() {
 		if s.watcher == nil {
 			continue
 		}
+		s.cancelWatchRetryLocked(watchKindRoot, target)
 		if err := s.watcher.Remove(target); err != nil && !errors.Is(err, fswatcher.ErrNotAdded) {
 			slog.Warn("failed to remove directory-tree watch", "target", target, "error", err)
 		}
@@ -245,12 +255,26 @@ func (s *State) isRootPath(p string) bool {
 	return false
 }
 
+// errRootLost is recorded as the failure reason when the watcher reports a
+// root watch as renamed or removed.
+var errRootLost = errors.New("watch root moved or removed")
+
 // noteRootLoss records that the watcher reported a root as renamed or removed.
 // The darwin backend deletes the stream itself in that case. The bookkeeping
-// stays in place so the pattern still owns its registration and a later retry
-// can re-establish the stream once the directory exists again.
+// stays in place so the pattern still owns its registration and the retry
+// loop can re-establish the stream once the directory exists again. The
+// failure is keyed on the canonical target so removeRootWatch's cancellation
+// (which resolves through aliasReverse) matches it; resolvePathAlias cannot
+// be used here because the directory may already be gone.
 func (s *State) noteRootLoss(path string) {
 	slog.Warn("watch root moved or removed; live-reload for its tree may be degraded", "root", path)
+	target := path
+	s.mu.RLock()
+	if canonical, ok := s.aliasReverse[path]; ok {
+		target = canonical
+	}
+	s.mu.RUnlock()
+	s.recordWatchFailure(watchKindRoot, target, errRootLost)
 }
 
 // dirMoveUnderRoot reports whether a renamed or removed path is a directory
@@ -356,4 +380,513 @@ func (s *State) releaseDirAlias(dir string) {
 	}
 	delete(s.dirAliases, dir)
 	s.unregisterPathAlias(dir)
+}
+
+// watchKind classifies which registration a health record belongs to.
+type watchKind int
+
+const (
+	watchKindFile watchKind = iota
+	watchKindDir
+	watchKindRoot
+)
+
+// watchKindName names the kind for logs and diagnostics.
+func watchKindName(k watchKind) string {
+	switch k {
+	case watchKindFile:
+		return "file"
+	case watchKindDir:
+		return "dir"
+	case watchKindRoot:
+		return "root"
+	}
+	return "watch"
+}
+
+func watchKey(kind watchKind, target string) string {
+	return fmt.Sprintf("%d|%s", int(kind), target)
+}
+
+// watchFailure is one currently-failing watch registration.
+type watchFailure struct {
+	kind     watchKind
+	target   string
+	err      string
+	at       time.Time
+	attempts int
+}
+
+// watchRetry is one pending re-registration attempt. The retry loop pops
+// entries when they come due and hands them to rewatchTarget, which
+// re-creates the entry (with a longer backoff) if the attempt fails again.
+type watchRetry struct {
+	kind     watchKind
+	target   string
+	attempts int
+	nextAt   time.Time
+}
+
+// watchHealth is the watcher's self-reported bookkeeping. All fields are
+// guarded by State.mu; the API projection is built by State.WatcherStatus.
+type watchHealth struct {
+	// failed holds one record per currently-failing watch target, keyed by
+	// watchKey(kind, target).
+	failed map[string]*watchFailure
+	// retries holds registrations waiting to be re-attempted.
+	retries map[string]*watchRetry
+
+	totalFailures  int
+	totalRecovered int
+
+	lastError     string
+	lastErrorPath string
+	lastErrorAt   time.Time
+
+	// consecutive counts registration failures since the last success; at
+	// watchBreakerAfter the circuit breaker opens.
+	consecutive int
+	// circuitUntil is the moment the breaker half-opens again; zero while
+	// closed. circuitOpens counts how often the breaker has opened in a row
+	// and doubles the open duration each time.
+	circuitUntil time.Time
+	circuitOpens int
+
+	// warnings counts errors reported on the watcher's error channel (e.g.
+	// the darwin backend dropping events). They do not degrade the watcher
+	// by themselves: nothing failed to register, so there is nothing to
+	// retry.
+	warnings    int
+	lastWarning string
+}
+
+// WatcherStatus is the JSON projection of watcher health: the shape of the
+// "watcher" field in the status API response and the payload of the
+// "watcher" SSE event.
+type WatcherStatus struct {
+	Status         string `json:"status"`
+	Roots          int    `json:"roots"`
+	DirWatches     int    `json:"dirWatches"`
+	FileWatches    int    `json:"fileWatches"`
+	Failed         int    `json:"failed"`
+	PendingRetries int    `json:"pendingRetries"`
+	CircuitOpen    bool   `json:"circuitOpen"`
+	TotalFailures  int    `json:"totalFailures"`
+	TotalRecovered int    `json:"totalRecovered"`
+	LastError      string `json:"lastError,omitempty"`
+	LastErrorPath  string `json:"lastErrorPath,omitempty"`
+	LastErrorAt    string `json:"lastErrorAt,omitempty"`
+	Warnings       int    `json:"warnings,omitempty"`
+	LastWarning    string `json:"lastWarning,omitempty"`
+}
+
+// Tunables are variables so tests can shrink the backoff and breaker
+// thresholds instead of waiting out the real values.
+var (
+	watchRetryBaseDelay = 500 * time.Millisecond
+	watchRetryMaxDelay  = 30 * time.Second
+	watchBreakerAfter   = 12
+	watchBreakerOpenFor = 5 * time.Minute
+	watchBreakerMaxOpen = 30 * time.Minute
+	// watchHealthEmitDelay coalesces health transitions into one SSE event.
+	watchHealthEmitDelay = 50 * time.Millisecond
+	// watchRetryIdlePoll is how often the retry loop wakes while there is
+	// nothing to retry (it mainly re-checks the circuit breaker).
+	watchRetryIdlePoll = 2 * time.Second
+)
+
+// RetryFailedWatches clears the circuit breaker and re-enqueues every failed
+// registration once. It backs the manual "retry now" path behind
+// POST /_/api/watcher/retry and returns the status after the attempt.
+func (s *State) RetryFailedWatches() WatcherStatus {
+	if s.watcher == nil {
+		return s.WatcherStatus()
+	}
+	now := time.Now()
+	s.mu.Lock()
+	s.health.consecutive = 0
+	s.health.circuitUntil = time.Time{}
+	s.health.circuitOpens = 0
+	for key, f := range s.health.failed {
+		if _, ok := s.health.retries[key]; !ok {
+			s.health.retries[key] = &watchRetry{
+				kind:     f.kind,
+				target:   f.target,
+				attempts: f.attempts,
+				nextAt:   now,
+			}
+		}
+	}
+	s.mu.Unlock()
+	s.retryDueWatches()
+	return s.WatcherStatus()
+}
+
+// WatcherStatus projects the health bookkeeping for the status API and SSE.
+func (s *State) WatcherStatus() WatcherStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	now := time.Now()
+	st := WatcherStatus{
+		Roots:          len(s.rootTargets),
+		DirWatches:     len(s.watchTargets),
+		FileWatches:    len(s.fileWatchTargets),
+		Failed:         len(s.health.failed),
+		PendingRetries: len(s.health.retries),
+		CircuitOpen:    s.circuitOpenLocked(now),
+		TotalFailures:  s.health.totalFailures,
+		TotalRecovered: s.health.totalRecovered,
+		LastError:      s.health.lastError,
+		LastErrorPath:  s.health.lastErrorPath,
+		Warnings:       s.health.warnings,
+		LastWarning:    s.health.lastWarning,
+	}
+	if !s.health.lastErrorAt.IsZero() {
+		st.LastErrorAt = s.health.lastErrorAt.Format(time.RFC3339)
+	}
+	if st.Failed > 0 || st.PendingRetries > 0 || st.CircuitOpen {
+		st.Status = "degraded"
+	} else {
+		st.Status = "healthy"
+	}
+	return st
+}
+
+// recordWatchFailure books a failed registration and schedules a retry. It is
+// the entry point for callers that hold no lock; the add*Watch helpers call
+// recordWatchFailureLocked directly.
+func (s *State) recordWatchFailure(kind watchKind, target string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordWatchFailureLocked(kind, target, err)
+}
+
+// recordWatchFailureLocked records a failed registration, arms the retry with
+// exponential backoff, and opens the circuit breaker once failures stack up
+// consecutively. Callers only reach this with a live watcher (every call site
+// sits behind a s.watcher != nil check), so it performs bookkeeping only.
+// Caller must hold s.mu.
+func (s *State) recordWatchFailureLocked(kind watchKind, target string, err error) {
+	if err == nil {
+		return
+	}
+	if s.health.failed == nil {
+		s.health.failed = make(map[string]*watchFailure)
+	}
+	if s.health.retries == nil {
+		s.health.retries = make(map[string]*watchRetry)
+	}
+	key := watchKey(kind, target)
+	now := time.Now()
+	f, ok := s.health.failed[key]
+	if !ok {
+		f = &watchFailure{kind: kind, target: target}
+		s.health.failed[key] = f
+	}
+	f.err = err.Error()
+	f.at = now
+	f.attempts++
+	s.health.totalFailures++
+	s.health.lastError = f.err
+	s.health.lastErrorPath = target
+	s.health.lastErrorAt = now
+	s.health.consecutive++
+
+	if s.health.consecutive >= watchBreakerAfter {
+		s.openCircuitLocked(now)
+	}
+	if !s.circuitOpenLocked(now) {
+		s.health.retries[key] = &watchRetry{
+			kind:     kind,
+			target:   target,
+			attempts: f.attempts,
+			nextAt:   now.Add(watchBackoffDelay(f.attempts)),
+		}
+		s.wakeRetryLoopLocked()
+	}
+	s.scheduleHealthEmit()
+}
+
+// openCircuitLocked arms the circuit breaker: further failures are not
+// enqueued for retry until circuitUntil passes. Each re-open doubles the open
+// duration, so a persistently overloaded OS watch limit is probed at an ever
+// lower frequency. Caller must hold s.mu.
+func (s *State) openCircuitLocked(now time.Time) {
+	d := watchBreakerOpenFor
+	for i := 0; i < s.health.circuitOpens && d < watchBreakerMaxOpen; i++ {
+		d *= 2
+	}
+	if d > watchBreakerMaxOpen {
+		d = watchBreakerMaxOpen
+	}
+	s.health.circuitUntil = now.Add(d)
+	s.health.circuitOpens++
+	slog.Warn("watch registrations keep failing; pausing retries", "resumeAt", s.health.circuitUntil.Format(time.RFC3339))
+}
+
+// circuitOpenLocked reports whether the breaker currently blocks retries.
+// Caller must hold s.mu (or RLock).
+func (s *State) circuitOpenLocked(now time.Time) bool {
+	return !s.health.circuitUntil.IsZero() && now.Before(s.health.circuitUntil)
+}
+
+// clearWatchFailure forgets a failed registration after a successful one, for
+// callers that hold no lock. It reports whether a failure record was cleared.
+func (s *State) clearWatchFailure(kind watchKind, target string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clearWatchFailureLocked(kind, target)
+}
+
+// clearWatchFailureLocked drops the failure and retry records for a target
+// that registered successfully. Any success also resets the consecutive
+// counter and the breaker: one healthy registration is enough evidence that
+// the OS limit has room again. It reports whether a failure record was
+// actually cleared, so a health event is emitted only on a real transition.
+// Caller must hold s.mu.
+func (s *State) clearWatchFailureLocked(kind watchKind, target string) bool {
+	key := watchKey(kind, target)
+	_, had := s.health.failed[key]
+	delete(s.health.failed, key)
+	_, hadRetry := s.health.retries[key]
+	delete(s.health.retries, key)
+	s.health.consecutive = 0
+	if !s.health.circuitUntil.IsZero() {
+		s.health.circuitUntil = time.Time{}
+		s.health.circuitOpens = 0
+	}
+	if had || hadRetry {
+		s.health.totalRecovered++
+		s.scheduleHealthEmit()
+		return true
+	}
+	return false
+}
+
+// cancelWatchRetryLocked drops failure and retry bookkeeping for a watch that
+// is being removed. Unlike a recovered registration, a removal is not a
+// recovery: neither totalRecovered nor the consecutive count is touched.
+// Caller must hold s.mu.
+func (s *State) cancelWatchRetryLocked(kind watchKind, target string) {
+	key := watchKey(kind, target)
+	_, had := s.health.failed[key]
+	delete(s.health.failed, key)
+	_, hadRetry := s.health.retries[key]
+	delete(s.health.retries, key)
+	if had || hadRetry {
+		s.scheduleHealthEmit()
+	}
+}
+
+// recordWatcherWarning books an error reported on the watcher's error
+// channel. Warnings are surfaced through the status API but do not degrade
+// the watcher: nothing failed to register, so there is nothing to retry.
+func (s *State) recordWatcherWarning(err error) {
+	if err == nil {
+		return
+	}
+	s.mu.Lock()
+	s.health.warnings++
+	s.health.lastWarning = err.Error()
+	s.mu.Unlock()
+}
+
+// watchBackoffDelay returns the delay before attempt n of a failed
+// registration: exponential from watchRetryBaseDelay, capped at
+// watchRetryMaxDelay, with ±20% jitter so a storm of failures does not retry
+// in lockstep.
+func watchBackoffDelay(attempts int) time.Duration {
+	d := watchRetryBaseDelay
+	for i := 1; i < attempts && d < watchRetryMaxDelay; i++ {
+		d *= 2
+	}
+	if d > watchRetryMaxDelay {
+		d = watchRetryMaxDelay
+	}
+	return time.Duration(float64(d) * (0.8 + 0.4*rand.Float64())) //nolint:gosec // jitter for retry timing, not a security-sensitive value
+}
+
+// watchRetryLoop re-registers failed watches in the background. Lock
+// discipline: it never holds s.mu while waiting, and rewatchTarget performs
+// watcher I/O without the lock — scheduleFileChanged and the event handlers
+// take s.mu, so holding it across a retry would risk deadlock.
+func (s *State) watchRetryLoop(ctx context.Context) {
+	for {
+		next := s.nextRetryDeadline()
+		var timer *time.Timer
+		var wake <-chan struct{}
+		if next.IsZero() {
+			timer = time.NewTimer(watchRetryIdlePoll)
+		} else {
+			wait := max(time.Until(next), 0)
+			timer = time.NewTimer(wait)
+			wake = s.healthWake
+		}
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		case <-wake:
+			timer.Stop()
+		}
+		s.retryDueWatches()
+	}
+}
+
+// nextRetryDeadline returns when the retry loop should wake next: the earliest
+// pending retry, the breaker's expiry (so a half-open probe happens on time),
+// or zero for "nothing scheduled". Caller must hold no lock.
+func (s *State) nextRetryDeadline() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var next time.Time
+	for _, r := range s.health.retries {
+		if next.IsZero() || r.nextAt.Before(next) {
+			next = r.nextAt
+		}
+	}
+	if cu := s.health.circuitUntil; !cu.IsZero() && (next.IsZero() || cu.Before(next)) {
+		next = cu
+	}
+	return next
+}
+
+// wakeRetryLoopLocked interrupts the retry loop's wait because a retry was
+// scheduled earlier than the deadline it is sleeping on. Caller must hold
+// s.mu.
+func (s *State) wakeRetryLoopLocked() {
+	select {
+	case s.healthWake <- struct{}{}:
+	default:
+	}
+}
+
+// retryDueWatches re-registers every retry whose deadline has passed. While
+// the circuit breaker is open nothing is attempted; when it expires, all
+// still-failing registrations are probed once (half-open).
+func (s *State) retryDueWatches() {
+	now := time.Now()
+	s.mu.Lock()
+	if s.circuitOpenLocked(now) {
+		s.mu.Unlock()
+		return
+	}
+	if !s.health.circuitUntil.IsZero() {
+		// The breaker just expired: probe every failed registration once.
+		s.health.circuitUntil = time.Time{}
+		for key, f := range s.health.failed {
+			if _, ok := s.health.retries[key]; !ok {
+				s.health.retries[key] = &watchRetry{
+					kind:     f.kind,
+					target:   f.target,
+					attempts: f.attempts,
+					nextAt:   now,
+				}
+			}
+		}
+	}
+	var due []watchRetry
+	for key, r := range s.health.retries {
+		if r.nextAt.After(now) {
+			continue
+		}
+		delete(s.health.retries, key)
+		due = append(due, *r)
+	}
+	s.mu.Unlock()
+
+	for _, r := range due {
+		if !s.watchRetryStillWanted(r.kind, r.target) {
+			// The pattern, directory, or file went away while the retry was
+			// pending; drop its failure record too so it stops counting as
+			// degraded.
+			s.mu.Lock()
+			delete(s.health.failed, watchKey(r.kind, r.target))
+			s.mu.Unlock()
+			s.scheduleHealthEmit()
+			continue
+		}
+		s.rewatchTarget(r)
+	}
+}
+
+// watchRetryStillWanted reports whether the logical reference a retry was
+// created for still exists, so removed patterns and files are not resurrected.
+func (s *State) watchRetryStillWanted(kind watchKind, target string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	switch kind {
+	case watchKindRoot:
+		return s.rootTargets[target] > 0
+	case watchKindDir:
+		return s.watchTargets[target] > 0
+	case watchKindFile:
+		return s.fileWatchTargets[target] > 0
+	}
+	return false
+}
+
+// rewatchTarget re-registers one failed watch. It performs watcher I/O
+// without holding s.mu, then records the outcome.
+func (s *State) rewatchTarget(r watchRetry) {
+	if s.watcher == nil {
+		return
+	}
+	s.mu.RLock()
+	var covered bool
+	switch r.kind {
+	case watchKindFile:
+		covered = s.fileCoveredLocked(r.target)
+	case watchKindDir:
+		covered = s.rootCoversLocked(r.target)
+	}
+	s.mu.RUnlock()
+	if covered {
+		// The target gained a covering watch since the failure; the retry is
+		// no longer needed.
+		s.clearWatchFailure(r.kind, r.target)
+		return
+	}
+	var err error
+	if r.kind == watchKindRoot {
+		err = s.watcher.AddRecursive(r.target, watchOps)
+	} else {
+		err = s.watcher.Add(r.target, watchOps)
+	}
+	if err == nil || errors.Is(err, fswatcher.ErrAlreadyAdded) {
+		s.clearWatchFailure(r.kind, r.target)
+		return
+	}
+	s.recordWatchFailure(r.kind, r.target, err)
+}
+
+// scheduleHealthEmit coalesces watcher health transitions into one SSE event:
+// maybeEmitHealth runs on a short timer because it takes s.mu (via
+// WatcherStatus) and must therefore not run while a caller still holds it.
+func (s *State) scheduleHealthEmit() {
+	if s.watcher == nil {
+		return
+	}
+	time.AfterFunc(watchHealthEmitDelay, s.maybeEmitHealth)
+}
+
+// maybeEmitHealth pushes the current watcher status to SSE subscribers when
+// its health status changed. Runs on its own goroutine via
+// scheduleHealthEmit; must not be called while holding s.mu. healthMu is held
+// across the dedup check and the send so concurrent emitters cannot deliver
+// an older status after a newer one.
+func (s *State) maybeEmitHealth() {
+	status := s.WatcherStatus()
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	if status.Status == s.lastHealthStatus {
+		return
+	}
+	s.lastHealthStatus = status.Status
+	b, err := json.Marshal(status)
+	if err != nil {
+		return
+	}
+	s.sendEvent(sseEvent{Name: eventWatcher, Data: string(b)})
 }

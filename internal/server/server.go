@@ -197,6 +197,7 @@ type sseEvent struct {
 const (
 	eventUpdate      = "update"
 	eventFileChanged = "file-changed"
+	eventWatcher     = "watcher"
 )
 
 // watchOps is the set of fswatcher ops the watch loop reacts to.
@@ -277,6 +278,19 @@ type State struct {
 	// the global.
 	rootWatch bool
 
+	// health holds the watcher's self-reported bookkeeping: failed
+	// registrations, pending retries, and the circuit breaker. Guarded by
+	// s.mu; see watch.go. healthWake wakes the retry loop when a retry
+	// becomes due earlier than the one it is currently waiting for.
+	health     watchHealth
+	healthWake chan struct{}
+
+	// healthMu guards lastHealthStatus, the dedup key for watcher SSE
+	// events. It is separate from s.mu because maybeEmitHealth runs on a
+	// timer and must not be called while s.mu is held.
+	healthMu         sync.Mutex
+	lastHealthStatus string
+
 	fileChangeDebounce time.Duration
 	fileChangeTimers   map[string]*time.Timer
 
@@ -310,6 +324,7 @@ func NewState(ctx context.Context) *State {
 		retainedRoots:      make(map[string]bool),
 		dirAliases:         make(map[string]int),
 		rootWatch:          watchRootsEnabled,
+		healthWake:         make(chan struct{}, 1),
 		fileChangeDebounce: defaultFileChangeDebounce,
 		fileChangeTimers:   make(map[string]*time.Timer),
 	}
@@ -317,6 +332,10 @@ func NewState(ctx context.Context) *State {
 	if w != nil {
 		donegroup.Go(ctx, func() error {
 			s.watchLoop()
+			return nil
+		})
+		donegroup.Go(ctx, func() error {
+			s.watchRetryLoop(ctx)
 			return nil
 		})
 	}
@@ -1178,6 +1197,9 @@ func (s *State) removeFileWatch(absPath string) {
 		return
 	}
 	delete(s.fileWatchTargets, target)
+	// The watch is going away deliberately: a pending retry for it must not
+	// resurrect a registration nothing references anymore.
+	s.cancelWatchRetryLocked(watchKindFile, target)
 	if s.watcher != nil {
 		// ErrNotAdded is normal here: a covered file was never registered
 		// individually, and a failed registration is retried later.
@@ -1214,6 +1236,7 @@ func (s *State) removeDirWatch(dir string) {
 		return
 	}
 	delete(s.watchTargets, target)
+	s.cancelWatchRetryLocked(watchKindDir, target)
 	if s.watcher != nil {
 		// ErrNotAdded is normal: a directory covered by a root was never
 		// registered individually.
@@ -1271,11 +1294,21 @@ func (s *State) watchLoop() {
 								s.scheduleFileChanged(eventPath)
 								return
 							}
+							// The file still exists here, so its alias
+							// resolution is reliable; the retry bookkeeping
+							// must use the same target removeFileWatch will
+							// cancel with.
+							target := eventPath
+							if canonical := resolvePathAlias(eventPath); canonical != "" {
+								target = canonical
+							}
 							if err := s.watcher.Add(eventPath, watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
 								slog.Warn("failed to re-watch file", "path", eventPath, "error", err)
+								s.recordWatchFailure(watchKindFile, target, err)
 								return
 							}
 							slog.Info("re-watching file", "path", eventPath)
+							s.clearWatchFailure(watchKindFile, target)
 							s.scheduleFileChanged(eventPath)
 						})
 					}
@@ -1297,6 +1330,7 @@ func (s *State) watchLoop() {
 				return
 			}
 			slog.Warn("file watcher error", "error", err)
+			s.recordWatcherWarning(err)
 		}
 	}
 }
@@ -1572,6 +1606,9 @@ func (s *State) addFileWatch(absPath, canonical string) {
 			// Keep the counts: a rollback here would desync removeFileWatch's
 			// bookkeeping, and registration failures are reconciled by retry.
 			slog.Warn("failed to watch file", "path", absPath, "target", target, "error", err)
+			s.recordWatchFailureLocked(watchKindFile, target, err)
+		} else {
+			s.clearWatchFailureLocked(watchKindFile, target)
 		}
 	}
 	s.registerPathAlias(absPath, canonical)
@@ -1609,6 +1646,9 @@ func (s *State) addDirWatch(dir string) {
 			// Keep the counts: a rollback here would desync removeDirWatch's
 			// bookkeeping, and registration failures are reconciled by retry.
 			slog.Warn("failed to watch directory", "path", dir, "target", target, "error", err)
+			s.recordWatchFailureLocked(watchKindDir, target, err)
+		} else {
+			s.clearWatchFailureLocked(watchKindDir, target)
 		}
 	}
 	s.registerPathAlias(dir, canonical)
@@ -1882,6 +1922,7 @@ func NewHandler(state *State) http.Handler {
 	mux.HandleFunc("POST /_/api/groups/{group}/files/open", handleOpenFile(state))
 	mux.HandleFunc("POST /_/api/patterns", handleAddPattern(state))
 	mux.HandleFunc("DELETE /_/api/patterns", handleRemovePattern(state))
+	mux.HandleFunc("POST /_/api/watcher/retry", handleWatcherRetry(state))
 	mux.HandleFunc("POST /_/api/restart", handleRestart(state))
 	mux.HandleFunc("POST /_/api/shutdown", handleShutdown(state))
 	mux.HandleFunc("GET /_/api/status", handleStatus(state))
@@ -2543,11 +2584,13 @@ func handleStatus(state *State) http.HandlerFunc {
 			Revision string        `json:"revision"`
 			PID      int           `json:"pid"`
 			Groups   []statusGroup `json:"groups"`
+			Watcher  WatcherStatus `json:"watcher"`
 		}{
 			Version:  version.Version,
 			Revision: version.Revision,
 			PID:      os.Getpid(),
 			Groups:   statusGroups,
+			Watcher:  state.WatcherStatus(),
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -2564,6 +2607,18 @@ func handleVersion() http.HandlerFunc {
 			"revision": version.Revision,
 		}); err != nil {
 			slog.Error("failed to encode version response", "error", err)
+		}
+	}
+}
+
+// handleWatcherRetry re-registers every failed watch immediately. It backs the
+// "retry now" affordance for a degraded watcher.
+func handleWatcherRetry(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		status := state.RetryFailedWatches()
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(status); err != nil {
+			slog.Error("failed to encode watcher retry response", "error", err)
 		}
 	}
 }

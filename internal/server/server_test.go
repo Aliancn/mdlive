@@ -52,6 +52,7 @@ func newTestState(t *testing.T) *State {
 		retainedRoots:      make(map[string]bool),
 		dirAliases:         make(map[string]int),
 		rootWatch:          watchRootsEnabled,
+		healthWake:         make(chan struct{}, 1),
 		fileChangeDebounce: defaultFileChangeDebounce,
 		fileChangeTimers:   make(map[string]*time.Timer),
 	}
@@ -3888,4 +3889,259 @@ func TestRestoreData_PatternFiltersRoundTrip(t *testing.T) {
 			t.Fatalf("got %d patternFilters, want 0 for legacy data", len(rd.PatternFilters))
 		}
 	})
+}
+
+// shrinkRetryTimings replaces the retry backoff and breaker tunables with
+// test-sized values and restores the originals via t.Cleanup.
+func shrinkRetryTimings(t *testing.T) {
+	t.Helper()
+	oldBase, oldMax := watchRetryBaseDelay, watchRetryMaxDelay
+	oldAfter, oldOpenFor := watchBreakerAfter, watchBreakerOpenFor
+	watchRetryBaseDelay, watchRetryMaxDelay = 20*time.Millisecond, 80*time.Millisecond
+	watchBreakerAfter, watchBreakerOpenFor = 3, 100*time.Millisecond
+	t.Cleanup(func() {
+		watchRetryBaseDelay, watchRetryMaxDelay = oldBase, oldMax
+		watchBreakerAfter, watchBreakerOpenFor = oldAfter, oldOpenFor
+	})
+}
+
+func TestWatchBackoffDelay(t *testing.T) {
+	oldBase, oldMax := watchRetryBaseDelay, watchRetryMaxDelay
+	watchRetryBaseDelay, watchRetryMaxDelay = time.Second, 8*time.Second
+	t.Cleanup(func() { watchRetryBaseDelay, watchRetryMaxDelay = oldBase, oldMax })
+
+	for range 50 {
+		if d := watchBackoffDelay(1); d < 800*time.Millisecond || d > 1200*time.Millisecond {
+			t.Fatalf("attempt 1 delay %v outside ±20%% of 1s", d)
+		}
+	}
+	// Later attempts grow exponentially and are capped at the maximum.
+	for range 50 {
+		if d := watchBackoffDelay(20); d < 8*time.Second*8/10 || d > 8*time.Second*12/10 {
+			t.Fatalf("capped delay %v outside ±20%% of 8s", d)
+		}
+	}
+}
+
+func TestRecordWatchFailure_DegradesAndEnqueues(t *testing.T) {
+	s := newTestState(t)
+
+	st := s.WatcherStatus()
+	if st.Status != "healthy" {
+		t.Fatalf("fresh watcher status = %q, want healthy", st.Status)
+	}
+
+	s.recordWatchFailure(watchKindFile, "/a.md", errors.New("boom"))
+	st = s.WatcherStatus()
+	if st.Status != "degraded" {
+		t.Fatalf("status after failure = %q, want degraded", st.Status)
+	}
+	if st.Failed != 1 || st.PendingRetries != 1 || st.TotalFailures != 1 {
+		t.Fatalf("got failed=%d retries=%d totalFailures=%d, want 1/1/1", st.Failed, st.PendingRetries, st.TotalFailures)
+	}
+	if st.LastError != "boom" || st.LastErrorPath != "/a.md" || st.LastErrorAt == "" {
+		t.Fatalf("last error fields not recorded: %+v", st)
+	}
+
+	// A second failure of the same target updates the record instead of
+	// duplicating it.
+	s.recordWatchFailure(watchKindFile, "/a.md", errors.New("boom"))
+	st = s.WatcherStatus()
+	if st.Failed != 1 || st.TotalFailures != 2 {
+		t.Fatalf("repeat failure: failed=%d totalFailures=%d, want 1/2", st.Failed, st.TotalFailures)
+	}
+
+	s.recordWatchFailure(watchKindDir, "/docs", errors.New("boom"))
+	if st := s.WatcherStatus(); st.Failed != 2 || st.PendingRetries != 2 {
+		t.Fatalf("second target: failed=%d retries=%d, want 2/2", st.Failed, st.PendingRetries)
+	}
+
+	// Each recovery heals its own target; the watcher stays degraded until
+	// the last one is cleared.
+	if !s.clearWatchFailure(watchKindFile, "/a.md") {
+		t.Fatal("clearWatchFailure reported no change for a failed target")
+	}
+	if st := s.WatcherStatus(); st.Status != "degraded" || st.Failed != 1 || st.TotalRecovered != 1 {
+		t.Fatalf("after first recovery: %+v", st)
+	}
+	if s.clearWatchFailure(watchKindFile, "/a.md") {
+		t.Fatal("clearWatchFailure reported a change for an already-clear target")
+	}
+	s.clearWatchFailure(watchKindDir, "/docs")
+	st = s.WatcherStatus()
+	if st.Status != "healthy" || st.Failed != 0 || st.PendingRetries != 0 || st.TotalRecovered != 2 {
+		t.Fatalf("after full recovery: %+v", st)
+	}
+}
+
+func TestWatchRetryLoop_RecoversRegisteredTarget(t *testing.T) {
+	shrinkRetryTimings(t)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.md")
+	if err := os.WriteFile(file, []byte("# a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := donegroup.WithCancel(context.Background())
+	defer cancel()
+	s := NewState(ctx)
+
+	// Simulate a live file reference whose registration failed.
+	s.mu.Lock()
+	s.fileWatchTargets[file] = 1
+	s.mu.Unlock()
+	s.recordWatchFailure(watchKindFile, file, errors.New("boom"))
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		st := s.WatcherStatus()
+		if st.TotalRecovered >= 1 && st.Status == "healthy" && st.PendingRetries == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("watch did not recover in time: %+v", s.WatcherStatus())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestWatchRetryLoop_SkipsCancelledTarget(t *testing.T) {
+	s := newTestState(t)
+
+	// A retry is only wanted while a logical reference exists for its target.
+	s.roots["/repo"] = 1
+	s.rootTargets["/repo"] = 1
+	s.watchTargets["/repo/docs"] = 1
+	s.fileWatchTargets["/repo/a.md"] = 1
+	for _, tc := range []struct {
+		kind   watchKind
+		target string
+	}{{watchKindRoot, "/repo"}, {watchKindDir, "/repo/docs"}, {watchKindFile, "/repo/a.md"}} {
+		if !s.watchRetryStillWanted(tc.kind, tc.target) {
+			t.Fatalf("%s %s still wanted with live reference", watchKindName(tc.kind), tc.target)
+		}
+	}
+	delete(s.rootTargets, "/repo")
+	delete(s.watchTargets, "/repo/docs")
+	delete(s.fileWatchTargets, "/repo/a.md")
+	for _, tc := range []struct {
+		kind   watchKind
+		target string
+	}{{watchKindRoot, "/repo"}, {watchKindDir, "/repo/docs"}, {watchKindFile, "/repo/a.md"}} {
+		if s.watchRetryStillWanted(tc.kind, tc.target) {
+			t.Fatalf("%s %s still wanted after reference removal", watchKindName(tc.kind), tc.target)
+		}
+	}
+
+	// Cancellation drops the failure record without counting it as a recovery.
+	s.mu.Lock()
+	s.fileWatchTargets["/repo/b.md"] = 1
+	s.mu.Unlock()
+	s.recordWatchFailure(watchKindFile, "/repo/b.md", errors.New("boom"))
+	s.mu.Lock()
+	s.cancelWatchRetryLocked(watchKindFile, "/repo/b.md")
+	s.mu.Unlock()
+	if st := s.WatcherStatus(); st.Failed != 0 || st.PendingRetries != 0 || st.TotalRecovered != 0 || st.TotalFailures != 1 {
+		t.Fatalf("after cancellation: %+v, want failed=0 retries=0 recovered=0", st)
+	}
+}
+
+func TestCircuitBreaker_OpensAndHalfOpens(t *testing.T) {
+	shrinkRetryTimings(t)
+	s := newTestState(t)
+
+	for i := 0; i < watchBreakerAfter; i++ {
+		s.recordWatchFailure(watchKindFile, "/a.md", errors.New("boom"))
+	}
+	if st := s.WatcherStatus(); !st.CircuitOpen {
+		t.Fatalf("breaker did not open after %d consecutive failures: %+v", watchBreakerAfter, st)
+	}
+
+	// While the breaker is open, due retries are held back.
+	s.mu.Lock()
+	for _, r := range s.health.retries {
+		r.nextAt = time.Now().Add(-time.Millisecond)
+	}
+	s.mu.Unlock()
+	s.retryDueWatches()
+	if st := s.WatcherStatus(); !st.CircuitOpen {
+		t.Fatalf("breaker closed while still open: %+v", st)
+	}
+
+	// Once the open window expires the half-open probe runs: retries are
+	// attempted (here they cannot re-register, but the breaker no longer
+	// blocks them) and the breaker reports closed.
+	s.mu.Lock()
+	s.health.circuitUntil = time.Now().Add(-time.Millisecond)
+	s.mu.Unlock()
+	s.retryDueWatches()
+	if st := s.WatcherStatus(); st.CircuitOpen {
+		t.Fatalf("breaker still open after expiry: %+v", st)
+	}
+
+	// A further failure after expiry re-opens with the doubled duration.
+	s.recordWatchFailure(watchKindFile, "/a.md", errors.New("boom"))
+	s.mu.RLock()
+	until := s.health.circuitUntil
+	s.mu.RUnlock()
+	d := time.Until(until)
+	if d <= watchBreakerOpenFor || d > 2*watchBreakerOpenFor+50*time.Millisecond {
+		t.Fatalf("re-open duration %v, want ~2x %v", d, watchBreakerOpenFor)
+	}
+
+	// A success closes the breaker and resets the consecutive count.
+	s.clearWatchFailure(watchKindFile, "/a.md")
+	if st := s.WatcherStatus(); st.CircuitOpen || st.Status != "healthy" {
+		t.Fatalf("success did not close breaker: %+v", st)
+	}
+	s.mu.RLock()
+	consecutive := s.health.consecutive
+	s.mu.RUnlock()
+	if consecutive != 0 {
+		t.Fatalf("consecutive count %d after success, want 0", consecutive)
+	}
+}
+
+func TestHealthSSEEvent_OnTransition(t *testing.T) {
+	// Push the first retry beyond the test horizon so the background loop
+	// cannot cancel the failure before its health event is emitted; the
+	// transitions under test are driven explicitly below.
+	oldBase := watchRetryBaseDelay
+	watchRetryBaseDelay = time.Hour
+	t.Cleanup(func() { watchRetryBaseDelay = oldBase })
+	ctx, cancel := donegroup.WithCancel(context.Background())
+	defer cancel()
+	s := NewState(ctx)
+	ch := s.Subscribe()
+	defer s.Unsubscribe(ch)
+
+	s.recordWatchFailure(watchKindFile, "/a.md", errors.New("boom"))
+	waitForWatcherEvent(t, s, ch, "degraded")
+	s.clearWatchFailure(watchKindFile, "/a.md")
+	waitForWatcherEvent(t, s, ch, "healthy")
+}
+
+// waitForWatcherEvent polls until a "watcher" SSE event carrying the wanted
+// health status arrives on ch, skipping unrelated events.
+func waitForWatcherEvent(t *testing.T, s *State, ch chan sseEvent, wantStatus string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Name != eventWatcher {
+				continue
+			}
+			var st WatcherStatus
+			if err := json.Unmarshal([]byte(ev.Data), &st); err != nil {
+				t.Fatalf("failed to decode watcher event: %v", err)
+			}
+			if st.Status == wantStatus {
+				return
+			}
+		case <-time.After(200 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q watcher event within deadline; last status %+v", wantStatus, s.WatcherStatus())
+		}
+	}
 }
