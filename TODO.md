@@ -16,15 +16,7 @@ Convenience gaps in the current file list design.
   every operation is one file at a time.
 - [ ] **Sort options for flat view.** Currently only manual drag order;
   add sort by name / modification time (server would need to send mtime).
-- [ ] **Recently viewed section** per group (localStorage, `ml-` prefix
-  convention), so switching back to a file you were reading two files ago
-  does not require hunting or search.
 - [ ] **Pin files to the top** of the list.
-- [ ] **File count per group** in the group dropdown, and a total count
-  somewhere in the sidebar.
-- [ ] **Add-files button.** A "+" that opens a file picker and uploads via
-  the existing `/_/api/groups/{group}/files/upload` endpoint (drag-and-drop
-  is the only path today).
 - [ ] **New-file indicator.** Files added by watch patterns get no visual
   distinction; a dot until first viewed would make "what just appeared"
   legible.
@@ -40,9 +32,6 @@ Convenience gaps in the current file list design.
   duplicate or missing headings jump wrong. Jump by anchor/line.
 - [ ] **In-document find navigation.** The search-hit marker rail exists
   but there is no next/previous match jump within the current document.
-- [ ] **Code blocks follow the theme.** Shiki is pinned to `github-dark`
-  (4 call sites), so code blocks stay dark in light theme while mermaid
-  already follows the theme. Use Shiki dual themes + CSS variables.
 - [ ] **Verify print output**; the `@media print` rules hide the chrome
   but the result has never been checked end to end.
 - [ ] **Export standalone HTML** (single self-contained file, inlined
