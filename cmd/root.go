@@ -2104,21 +2104,12 @@ func startServer(ctx context.Context, addr string, filesByGroup map[string][]str
 
 	var deeplinks []deeplinkEntry
 	var totalFiles, skippedFiles int
-	for group, files := range filesByGroup {
-		for _, f := range files {
-			totalFiles++
-			entry, err := state.AddFile(f, group)
-			if err != nil {
-				skippedFiles++
-				slog.Warn("skipping file", "path", f, "error", err)
-				continue
-			}
-			deeplinks = append(deeplinks, deeplinkEntry{
-				URL:  buildDeeplink(addr, group, entry.ID),
-				Path: entry.Path,
-			})
-		}
-	}
+	// Patterns go first: a large restored session is re-added as plain files,
+	// and if the pattern's root watch does not exist yet every one of those
+	// files registers a physical watch — a session big enough exhausts the OS
+	// watch limit partway through, and the root registration afterwards fails
+	// too. With the root in place first, AddFile dedup keeps the expansion's
+	// entries and the per-file adds below skip physical registration.
 	var patternsAdded int
 	for group, specs := range specsByGroup {
 		for _, spec := range specs {
@@ -2139,6 +2130,21 @@ func startServer(ctx context.Context, addr string, filesByGroup map[string][]str
 					Path: entry.Path,
 				})
 			}
+		}
+	}
+	for group, files := range filesByGroup {
+		for _, f := range files {
+			totalFiles++
+			entry, err := state.AddFile(f, group)
+			if err != nil {
+				skippedFiles++
+				slog.Warn("skipping file", "path", f, "error", err)
+				continue
+			}
+			deeplinks = append(deeplinks, deeplinkEntry{
+				URL:  buildDeeplink(addr, group, entry.ID),
+				Path: entry.Path,
+			})
 		}
 	}
 
