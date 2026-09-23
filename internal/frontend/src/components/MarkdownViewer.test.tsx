@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { fetchFileContent, openRelativeFile } from "../hooks/useApi";
 
@@ -114,6 +115,21 @@ describe("MarkdownViewer file label", () => {
 
     const label = await screen.findByTitle("/home/me/code/mo/docs/README.md");
     expect(label).toHaveClass("text-right");
+  });
+});
+
+describe("MarkdownViewer load failure", () => {
+  it("shows an error with a retry button and recovers on retry", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchFileContent)
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValue({ content: "# Hello", baseDir: "/repo" });
+    renderViewer();
+
+    expect(await screen.findByText("Failed to load file.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Hello" })).toBeInTheDocument();
   });
 });
 

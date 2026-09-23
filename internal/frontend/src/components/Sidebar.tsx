@@ -23,6 +23,7 @@ import type { ViewMode } from "./ViewModeToggle";
 import { TreeView } from "./TreeView";
 import { FileContextMenu } from "./FileContextMenu";
 import { FileIcon } from "./FileIcon";
+import { useToast } from "./Toast";
 
 const MIN_WIDTH = 180;
 const MAX_WIDTH = 480;
@@ -339,16 +340,18 @@ export function Sidebar({
       });
   }, [groups, activeGroup]);
 
+  const showToast = useToast();
+
   const handleMoveToGroup = useCallback(
     async (id: string, group: string) => {
       setMenuOpenId(null);
       try {
         await moveFile(activeGroup, id, group);
       } catch (err) {
-        window.alert(err instanceof Error ? err.message : "Failed to move file");
+        showToast(err instanceof Error ? err.message : "Failed to move file");
       }
     },
-    [activeGroup],
+    [activeGroup, showToast],
   );
 
   const handleCopyPath = useCallback((path: string) => {

@@ -17,6 +17,7 @@ import { RawToggle } from "./RawToggle";
 import { TocToggle } from "./TocToggle";
 import { CopyButton } from "./CopyButton";
 import { CloseFileButton } from "./CloseFileButton";
+import { ErrorNotice } from "./ErrorNotice";
 import { resolveLink, resolveImageSrc, extractLanguage } from "../utils/resolve";
 import { buildRelativeOpenUrl } from "../utils/groups";
 import { parseFrontmatter } from "../utils/frontmatter";
@@ -587,6 +588,8 @@ export function MarkdownViewer({
 }: MarkdownViewerProps) {
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
   const [isRawView, setIsRawView] = useState(false);
   const [searchHitMarkers, setSearchHitMarkers] = useState<SearchHitMarker[]>([]);
   // The sticky bar shows the file name only while the document's own title is on
@@ -600,6 +603,7 @@ export function MarkdownViewer({
   if (fileId !== prevFetchKey.fileId || revision !== prevFetchKey.revision) {
     setPrevFetchKey({ fileId, revision });
     setLoading(true);
+    setFetchError(false);
   }
 
   useEffect(() => {
@@ -613,14 +617,14 @@ export function MarkdownViewer({
       })
       .catch(() => {
         if (!cancelled) {
-          setContent("Failed to load file.");
+          setFetchError(true);
           setLoading(false);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [activeGroup, fileId, revision]);
+  }, [activeGroup, fileId, revision, retryCount]);
 
   const handleLinkClick = useCallback(
     async (e: React.MouseEvent<HTMLAnchorElement>, href: string) => {
@@ -897,6 +901,19 @@ export function MarkdownViewer({
       <div className="flex items-center justify-center h-50 text-gh-text-secondary text-sm">
         Loading...
       </div>
+    );
+  }
+
+  if (fetchError) {
+    return (
+      <ErrorNotice
+        message="Failed to load file."
+        onRetry={() => {
+          setFetchError(false);
+          setLoading(true);
+          setRetryCount((c) => c + 1);
+        }}
+      />
     );
   }
 
