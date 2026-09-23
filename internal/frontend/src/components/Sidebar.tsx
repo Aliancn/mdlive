@@ -29,6 +29,9 @@ const MIN_WIDTH = 180;
 const MAX_WIDTH = 480;
 const DEFAULT_WIDTH = 260;
 const STORAGE_KEY = "ml-sidebar-width";
+// With a short file list the whole list is on screen; the recently viewed
+// section only pays off once the list is long enough to hunt through.
+const RECENT_MIN_GROUP_FILES = 5;
 
 function getInitialWidth(): number {
   const stored = localStorage.getItem(STORAGE_KEY);
@@ -175,6 +178,8 @@ interface SidebarProps {
   onFilesReorder: (groupName: string, fileIds: string[]) => void;
   viewMode: ViewMode;
   showTitle: boolean;
+  /** Recently viewed file ids in this group, most recent first. */
+  recentFileIds?: string[];
   searchQuery: string | null;
   onSearchQueryChange: (query: string | null) => void;
   searchResults?: SearchResult[];
@@ -190,6 +195,7 @@ export function Sidebar({
   onFilesReorder,
   viewMode,
   showTitle,
+  recentFileIds = [],
   searchQuery,
   onSearchQueryChange,
   searchResults = [],
@@ -253,6 +259,7 @@ export function Sidebar({
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [contentMatchesOpen, setContentMatchesOpen] = useState(true);
   const [fileMatchesOpen, setFileMatchesOpen] = useState(true);
+  const [recentOpen, setRecentOpen] = useState(true);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const sensors = useSensors(
@@ -340,6 +347,17 @@ export function Sidebar({
       });
   }, [groups, activeGroup]);
 
+  // Recently viewed rows: only existing files of this group, minus the active
+  // one (its row is already highlighted in the list below).
+  const recentFiles = useMemo(() => {
+    if (isSearching || allFiles.length <= RECENT_MIN_GROUP_FILES) return [];
+    const byId = new Map(allFiles.map((f) => [f.id, f]));
+    return recentFileIds
+      .filter((id) => id !== activeFileId)
+      .map((id) => byId.get(id))
+      .filter((f): f is FileEntry => f != null);
+  }, [isSearching, allFiles, recentFileIds, activeFileId]);
+
   const showToast = useToast();
 
   const handleMoveToGroup = useCallback(
@@ -402,6 +420,40 @@ export function Sidebar({
         </div>
       )}
       <nav className="flex flex-col pb-1">
+        {recentFiles.length > 0 && (
+          <>
+            <button
+              type="button"
+              className="flex w-full items-center justify-between px-3 pt-2 pb-1 text-left text-xs font-semibold uppercase tracking-wide text-gh-text-secondary"
+              onClick={() => setRecentOpen((v) => !v)}
+              aria-expanded={recentOpen}
+            >
+              <span>Recent</span>
+              <span className="text-sm leading-none">{recentOpen ? "−" : "+"}</span>
+            </button>
+            {recentOpen &&
+              recentFiles.map((f) => (
+                <FileItem
+                  key={f.id}
+                  file={f}
+                  activeGroup={activeGroup}
+                  isActive={f.id === activeFileId}
+                  showTitle={showTitle}
+                  directory={duplicatedNames.has(f.name) ? parentDirectory(f) : ""}
+                  menuOpenId={menuOpenId}
+                  otherGroups={otherGroups}
+                  onFileSelect={onFileSelect}
+                  onMenuToggle={handleMenuToggle}
+                  onOpenInNewTab={handleOpenInNewTab}
+                  onCopyPath={handleCopyPath}
+                  onCopyLink={handleCopyLink}
+                  onMoveToGroup={handleMoveToGroup}
+                  onRemove={handleRemove}
+                  menuRef={menuRef}
+                />
+              ))}
+          </>
+        )}
         {isSearching ? (
           <>
             {searchLoading ? (

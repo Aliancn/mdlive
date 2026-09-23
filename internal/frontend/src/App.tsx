@@ -39,6 +39,12 @@ import {
 } from "./utils/groups";
 import { isMarkdownFile } from "./utils/filetype";
 import { formatFileLabel } from "./utils/fileLabel";
+import {
+  loadRecentByGroup,
+  pushRecentFile,
+  RECENT_STORAGE_KEY,
+  type RecentByGroup,
+} from "./utils/recent";
 
 const VIEWMODE_STORAGE_KEY = "ml-sidebar-viewmode";
 const WIDTH_STORAGE_KEY = "ml-layout-width";
@@ -130,6 +136,7 @@ export function App() {
     }
   });
   const [fontSize, setFontSize] = useState<FontSize>(getInitialFontSize);
+  const [recentByGroup, setRecentByGroup] = useState<RecentByGroup>(loadRecentByGroup);
   const knownFileIds = useRef<Set<string>>(new Set());
   const [initialFileId, setInitialFileId] = useState<string | null>(() => {
     const fromUrl = parseFileIdFromSearch(window.location.search);
@@ -401,6 +408,21 @@ export function App() {
     }
   }, [fontSize]);
 
+  // Recently viewed files, per group, so switching back to something read a
+  // few files ago does not require hunting through the list.
+  useEffect(() => {
+    if (activeFileId == null) return;
+    setRecentByGroup((prev) => pushRecentFile(prev, activeGroup, activeFileId));
+  }, [activeFileId, activeGroup]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(RECENT_STORAGE_KEY, JSON.stringify(recentByGroup));
+    } catch {
+      /* ignore */
+    }
+  }, [recentByGroup]);
+
   const handleViewModeToggle = useCallback(() => {
     setViewModes((prev) => {
       const current = prev[activeGroup] ?? "flat";
@@ -552,6 +574,7 @@ export function App() {
             onFilesReorder={handleFilesReorder}
             viewMode={currentViewMode}
             showTitle={currentShowTitle}
+            recentFileIds={recentByGroup[activeGroup] ?? []}
             searchQuery={searchQuery}
             onSearchQueryChange={setSearchQuery}
             searchResults={searchResults}

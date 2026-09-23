@@ -588,4 +588,121 @@ describe("Sidebar", () => {
     // The saved collapse state is overridden for the active file's ancestors.
     expect(screen.getByText("deep.md")).toBeInTheDocument();
   });
+
+  describe("recently viewed section", () => {
+    const manyGroups: Group[] = [
+      {
+        name: "default",
+        files: Array.from({ length: 6 }, (_, i) => ({
+          id: `file${i}`,
+          name: `file${i}.md`,
+          path: `/file${i}.md`,
+        })),
+      },
+    ];
+
+    it("shows recent files except the active one", () => {
+      render(
+        <Sidebar
+          groups={manyGroups}
+          activeGroup="default"
+          activeFileId="file5"
+          onFileSelect={() => {}}
+          onFilesReorder={() => {}}
+          viewMode="flat"
+          showTitle={false}
+          recentFileIds={["file5", "file3", "file1"]}
+          searchQuery={null}
+          onSearchQueryChange={() => {}}
+        />,
+      );
+      // The active file is already highlighted in the list below; the recent
+      // section shows the others (their names appear twice: recent + list).
+      expect(screen.getByText("Recent")).toBeInTheDocument();
+      expect(screen.getAllByText("file3.md")).toHaveLength(2);
+      expect(screen.getAllByText("file1.md")).toHaveLength(2);
+      expect(screen.getAllByText("file5.md")).toHaveLength(1);
+      // Files never viewed recently appear only in the list.
+      expect(screen.getAllByText("file0.md")).toHaveLength(1);
+    });
+
+    it("hides the section for short file lists", () => {
+      render(
+        <Sidebar
+          groups={groups}
+          activeGroup="default"
+          activeFileId="aaa11111"
+          onFileSelect={() => {}}
+          onFilesReorder={() => {}}
+          viewMode="flat"
+          showTitle={false}
+          recentFileIds={["aaa11111", "bbb22222"]}
+          searchQuery={null}
+          onSearchQueryChange={() => {}}
+        />,
+      );
+      expect(screen.queryByText("Recent")).not.toBeInTheDocument();
+    });
+
+    it("hides the section while searching", () => {
+      render(
+        <Sidebar
+          groups={manyGroups}
+          activeGroup="default"
+          activeFileId="file5"
+          onFileSelect={() => {}}
+          onFilesReorder={() => {}}
+          viewMode="flat"
+          showTitle={false}
+          recentFileIds={["file3", "file1"]}
+          searchQuery="file"
+          onSearchQueryChange={() => {}}
+        />,
+      );
+      expect(screen.queryByText("Recent")).not.toBeInTheDocument();
+    });
+
+    it("skips ids that no longer exist in the group", () => {
+      render(
+        <Sidebar
+          groups={manyGroups}
+          activeGroup="default"
+          activeFileId="file5"
+          onFileSelect={() => {}}
+          onFilesReorder={() => {}}
+          viewMode="flat"
+          showTitle={false}
+          recentFileIds={["gone", "file3"]}
+          searchQuery={null}
+          onSearchQueryChange={() => {}}
+        />,
+      );
+      expect(screen.getByText("Recent")).toBeInTheDocument();
+      expect(screen.getAllByText("file3.md").length).toBe(2);
+      expect(screen.queryByText("gone")).not.toBeInTheDocument();
+    });
+
+    it("collapses and expands", async () => {
+      const user = userEvent.setup();
+      render(
+        <Sidebar
+          groups={manyGroups}
+          activeGroup="default"
+          activeFileId="file5"
+          onFileSelect={() => {}}
+          onFilesReorder={() => {}}
+          viewMode="flat"
+          showTitle={false}
+          recentFileIds={["file3", "file1"]}
+          searchQuery={null}
+          onSearchQueryChange={() => {}}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: /recent/i }));
+      // Collapsed: only one row per file remains (the main list's).
+      expect(screen.getAllByText("file3.md")).toHaveLength(1);
+      await user.click(screen.getByRole("button", { name: /recent/i }));
+      expect(screen.getAllByText("file3.md")).toHaveLength(2);
+    });
+  });
 });
