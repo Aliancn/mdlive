@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"net"
@@ -74,6 +75,7 @@ var (
 	clearBackup                  bool
 	jsonOutput                   bool
 	dangerouslyAllowRemoteAccess bool
+	reloadMode                   bool
 	excludes                     []string
 	includeHidden                bool
 	ignoreFile                   string
@@ -237,6 +239,7 @@ func init() {
 	rootCmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "Recurse into subdirectories when a directory is given")
 	rootCmd.Flags().BoolVar(&closeFiles, "close", false, "Close files instead of opening them")
 	rootCmd.Flags().BoolVar(&clearBackup, "clear", false, "Clear saved session for the specified port")
+	rootCmd.Flags().BoolVar(&reloadMode, "reload", false, "Re-apply .mlignore and --exclude rules to patterns registered from the current directory")
 	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output structured data as JSON to stdout")
 	rootCmd.Flags().BoolVar(&dangerouslyAllowRemoteAccess, "dangerously-allow-remote-access", false, "Allow remote access without authentication. Recommended only for trusted networks.")
 	rootCmd.Flags().StringArrayVar(&excludes, "exclude", nil, "Glob pattern of files to exclude from discovery (repeatable)")
@@ -378,6 +381,16 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 			fmt.Fprintf(os.Stderr, "ml: closed %d file(s) from http://%s\n", len(closedPaths), addr)
 		}
 		return err
+	}
+
+	if reloadMode {
+		if watchMode {
+			return fmt.Errorf("cannot use --reload with --watch")
+		}
+		if len(args) > 0 {
+			return fmt.Errorf("cannot use --reload with file arguments")
+		}
+		return doReload(addr, cmd.Flags().Changed("exclude"), cmd.Flags().Changed("include-hidden"))
 	}
 
 	if restore != "" {
@@ -801,13 +814,23 @@ func fetchRegisteredPatterns(addr, groupName string) ([]string, error) {
 // values, so that the flags win under last-match-wins. The returned filter is
 // never nil: even with no rules it enforces the default hidden-path rule.
 func resolveFilter(cwd string) (*ignore.Filter, error) {
-	rules := ignore.Rules{Base: filepath.ToSlash(cwd)}
+	// IgnoreFile and FlagExcludes record where the rules came from, so
+	// `ml --reload` can re-read the ignore file and swap the --exclude
+	// values without touching the other half.
+	rules := ignore.Rules{
+		Base:         filepath.ToSlash(cwd),
+		IgnoreFile:   ignoreFile,
+		FlagExcludes: append([]string{}, excludes...),
+	}
 	if ignoreFile != "" {
 		lines, err := ignore.ReadLines(filepath.Join(cwd, ignoreFile))
 		if err != nil {
 			return nil, fmt.Errorf("cannot read %s: %w", ignoreFile, err)
 		}
 		for _, line := range lines {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
 			if err := ignore.ValidateLine(line); err != nil {
 				fmt.Fprintf(os.Stderr, "ml: warning: ignoring invalid line in %s: %v\n", ignoreFile, err)
 				continue
@@ -1300,6 +1323,169 @@ func doRestart(addr string) error {
 	slog.Info("restart request sent", "addr", addr)
 	fmt.Fprintf(os.Stderr, "ml: restart request sent to http://%s\n", addr)
 	return nil
+}
+
+// doReload re-reads the discovery rules (.mlignore lines and --exclude
+// values) for patterns registered from the current directory and pushes them
+// to the running server, which drops entries the new rules reject and picks
+// up files the new rules admit. Patterns registered from another directory
+// are skipped with a hint.
+func doReload(addr string, excludeChanged, includeHiddenChanged bool) error {
+	result, err := probeServer(addr)
+	if err != nil {
+		if errors.Is(err, errForeignServer) {
+			return err
+		}
+		return fmt.Errorf("%w (nothing to reload)", err)
+	}
+
+	resp, err := result.client.Get(fmt.Sprintf("http://%s/_/api/status", addr))
+	if err != nil {
+		return fmt.Errorf("failed to query server state: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return fmt.Errorf("unexpected response from server: %s", resp.Status)
+	}
+	var status statusResponse
+	err = json.NewDecoder(resp.Body).Decode(&status)
+	resp.Body.Close()
+	if err != nil {
+		return fmt.Errorf("failed to decode server state: %w", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	cwdSlash := filepath.ToSlash(cwd)
+
+	var filters []server.PatternFilterData
+	otherBases := []string{}
+	legacyCount := 0
+	for _, g := range status.Groups {
+		for _, pf := range g.PatternFilters {
+			if pf.Rules.Base != cwdSlash && pf.Rules.Base != "" {
+				if !slices.Contains(otherBases, pf.Rules.Base) {
+					otherBases = append(otherBases, pf.Rules.Base)
+				}
+				continue
+			}
+			rules, ok := reloadRulesFor(pf.Rules, excludeChanged, includeHiddenChanged)
+			if !ok {
+				legacyCount++
+				continue
+			}
+			filters = append(filters, server.PatternFilterData{
+				Pattern: pf.Pattern,
+				Group:   pf.Group,
+				Rules:   rules,
+			})
+		}
+	}
+	if len(otherBases) > 0 {
+		fmt.Fprintf(os.Stderr, "ml: note: %d pattern(s) registered from another directory were not reloaded; run ml --reload from %s\n", len(otherBases), otherBases[0])
+	}
+	if legacyCount > 0 {
+		fmt.Fprintf(os.Stderr, "ml: note: %d pattern(s) were registered by an older ml and cannot be reloaded; re-register them to apply the new rules\n", legacyCount)
+	}
+	if len(filters) == 0 {
+		fmt.Fprintf(os.Stderr, "ml: no reloadable pattern registered from %s\n", cwd)
+		return nil
+	}
+
+	body, err := json.Marshal(server.ReloadRequest{Filters: filters})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	resp, err = result.client.Post(fmt.Sprintf("http://%s/_/api/reload", addr), "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to send reload request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected response from server: %s", resp.Status)
+	}
+	var out server.ReloadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("failed to decode reload response: %w", err)
+	}
+
+	if jsonOutput {
+		writeJSON(out)
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "ml: reloaded %d pattern(s): added %d, removed %d, unchanged %d (%d excluded)\n",
+		out.Patterns, out.Added, out.Removed, out.Unchanged, out.Excluded)
+	for i, p := range out.RemovedPaths {
+		if i >= 5 {
+			fmt.Fprintf(os.Stderr, "  … and %d more removed file(s) — use --json to list every path\n", len(out.RemovedPaths)-i)
+			break
+		}
+		fmt.Fprintf(os.Stderr, "  removed %s\n", p)
+	}
+	return nil
+}
+
+// reloadRulesFor resolves the fresh rules for one pattern from the current
+// working directory and command line: the ignore file is re-read, and
+// --exclude/--include-hidden replace the stored values only when they were
+// given on this invocation — otherwise the pattern keeps what it was
+// registered with, which is exactly what the split metadata fields record.
+// It reports false for patterns stored by ml ≤ 0.1.0, whose file lines and
+// flag values cannot be told apart, leaving their rules untouched.
+func reloadRulesFor(old ignore.Rules, excludeChanged, includeHiddenChanged bool) (ignore.Rules, bool) {
+	if old.IgnoreFile == "" && old.FlagExcludes == nil {
+		return ignore.Rules{}, false
+	}
+	newRules := ignore.Rules{
+		Base:         old.Base,
+		IgnoreFile:   old.IgnoreFile,
+		FlagExcludes: old.FlagExcludes,
+	}
+	// A pattern registered with --ignore-file '' keeps the ignore file
+	// disabled; otherwise the file is re-read from the working directory.
+	// A file that has since disappeared simply contributes no lines.
+	if old.IgnoreFile != "" {
+		lines, err := ignore.ReadLines(filepath.Join(cwdForRules(old), old.IgnoreFile))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "ml: warning: cannot read %s: %v\n", old.IgnoreFile, err)
+		}
+		for _, line := range lines {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			if err := ignore.ValidateLine(line); err != nil {
+				fmt.Fprintf(os.Stderr, "ml: warning: ignoring invalid line in %s: %v\n", old.IgnoreFile, err)
+				continue
+			}
+			newRules.Excludes = append(newRules.Excludes, line)
+		}
+	}
+	if excludeChanged {
+		newRules.FlagExcludes = slices.Clone(excludes)
+	}
+	newRules.Excludes = append(newRules.Excludes, newRules.FlagExcludes...)
+	if includeHiddenChanged {
+		newRules.IncludeHidden = includeHidden
+	} else {
+		newRules.IncludeHidden = old.IncludeHidden
+	}
+	return newRules, true
+}
+
+// cwdForRules returns the directory the ignore file is re-read from: the
+// pattern's own base when it has one, the current directory otherwise.
+func cwdForRules(old ignore.Rules) string {
+	if old.Base != "" {
+		return filepath.FromSlash(old.Base)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
 }
 
 func doUnwatch(addr string, patterns []string, groupName string) error {

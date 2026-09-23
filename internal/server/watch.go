@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/fswatcher/fswatcher"
@@ -480,28 +481,41 @@ type WatcherStatus struct {
 	LastWarning    string `json:"lastWarning,omitempty"`
 }
 
-// Tunables are variables so tests can shrink the backoff and breaker
-// thresholds instead of waiting out the real values.
+// Tunables are atomics so tests can shrink the backoff and breaker thresholds
+// without racing the retry loop of a state whose test has already returned.
+// All values are nanoseconds except watchBreakerAfter, which is a count.
 var (
-	watchRetryBaseDelay = 500 * time.Millisecond
-	watchRetryMaxDelay  = 30 * time.Second
-	watchBreakerAfter   = 12
-	watchBreakerOpenFor = 5 * time.Minute
-	watchBreakerMaxOpen = 30 * time.Minute
+	watchRetryBaseDelay  atomic.Int64
+	watchRetryMaxDelay   atomic.Int64
+	watchBreakerAfter    atomic.Int64
+	watchBreakerOpenFor  atomic.Int64
+	watchBreakerMaxOpen  atomic.Int64
+	watchHealthEmitDelay atomic.Int64
+	watchRetryIdlePoll   atomic.Int64
+)
+
+func init() {
+	watchRetryBaseDelay.Store(int64(500 * time.Millisecond))
+	watchRetryMaxDelay.Store(int64(30 * time.Second))
+	watchBreakerAfter.Store(12)
+	watchBreakerOpenFor.Store(int64(5 * time.Minute))
+	watchBreakerMaxOpen.Store(int64(30 * time.Minute))
 	// watchHealthEmitDelay coalesces health transitions into one SSE event.
-	watchHealthEmitDelay = 50 * time.Millisecond
+	watchHealthEmitDelay.Store(int64(50 * time.Millisecond))
 	// watchRetryIdlePoll is how often the retry loop wakes while there is
 	// nothing to retry (it mainly re-checks the circuit breaker).
-	watchRetryIdlePoll = 2 * time.Second
-)
+	watchRetryIdlePoll.Store(int64(2 * time.Second))
+}
+
+// watchDur reads one of the duration tunables.
+func watchDur(v *atomic.Int64) time.Duration {
+	return time.Duration(v.Load())
+}
 
 // RetryFailedWatches clears the circuit breaker and re-enqueues every failed
 // registration once. It backs the manual "retry now" path behind
 // POST /_/api/watcher/retry and returns the status after the attempt.
 func (s *State) RetryFailedWatches() WatcherStatus {
-	if s.watcher == nil {
-		return s.WatcherStatus()
-	}
 	now := time.Now()
 	s.mu.Lock()
 	s.health.consecutive = 0
@@ -523,14 +537,15 @@ func (s *State) RetryFailedWatches() WatcherStatus {
 }
 
 // WatcherStatus projects the health bookkeeping for the status API and SSE.
+// The watch counts are physical: entries covered by a root (or a parent
+// directory) hold only bookkeeping references, not their own streams, and
+// must not inflate the numbers.
 func (s *State) WatcherStatus() WatcherStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	now := time.Now()
 	st := WatcherStatus{
 		Roots:          len(s.rootTargets),
-		DirWatches:     len(s.watchTargets),
-		FileWatches:    len(s.fileWatchTargets),
 		Failed:         len(s.health.failed),
 		PendingRetries: len(s.health.retries),
 		CircuitOpen:    s.circuitOpenLocked(now),
@@ -540,6 +555,16 @@ func (s *State) WatcherStatus() WatcherStatus {
 		LastErrorPath:  s.health.lastErrorPath,
 		Warnings:       s.health.warnings,
 		LastWarning:    s.health.lastWarning,
+	}
+	for target := range s.watchTargets {
+		if !s.rootCoversLocked(target) {
+			st.DirWatches++
+		}
+	}
+	for target := range s.fileWatchTargets {
+		if !s.fileCoveredLocked(target) {
+			st.FileWatches++
+		}
 	}
 	if !s.health.lastErrorAt.IsZero() {
 		st.LastErrorAt = s.health.lastErrorAt.Format(time.RFC3339)
@@ -592,7 +617,7 @@ func (s *State) recordWatchFailureLocked(kind watchKind, target string, err erro
 	s.health.lastErrorAt = now
 	s.health.consecutive++
 
-	if s.health.consecutive >= watchBreakerAfter {
+	if s.health.consecutive >= int(watchBreakerAfter.Load()) {
 		s.openCircuitLocked(now)
 	}
 	if !s.circuitOpenLocked(now) {
@@ -612,12 +637,13 @@ func (s *State) recordWatchFailureLocked(kind watchKind, target string, err erro
 // duration, so a persistently overloaded OS watch limit is probed at an ever
 // lower frequency. Caller must hold s.mu.
 func (s *State) openCircuitLocked(now time.Time) {
-	d := watchBreakerOpenFor
-	for i := 0; i < s.health.circuitOpens && d < watchBreakerMaxOpen; i++ {
+	d := watchDur(&watchBreakerOpenFor)
+	maxOpen := watchDur(&watchBreakerMaxOpen)
+	for i := 0; i < s.health.circuitOpens && d < maxOpen; i++ {
 		d *= 2
 	}
-	if d > watchBreakerMaxOpen {
-		d = watchBreakerMaxOpen
+	if d > maxOpen {
+		d = maxOpen
 	}
 	s.health.circuitUntil = now.Add(d)
 	s.health.circuitOpens++
@@ -696,12 +722,13 @@ func (s *State) recordWatcherWarning(err error) {
 // watchRetryMaxDelay, with ±20% jitter so a storm of failures does not retry
 // in lockstep.
 func watchBackoffDelay(attempts int) time.Duration {
-	d := watchRetryBaseDelay
-	for i := 1; i < attempts && d < watchRetryMaxDelay; i++ {
+	d := watchDur(&watchRetryBaseDelay)
+	maxDelay := watchDur(&watchRetryMaxDelay)
+	for i := 1; i < attempts && d < maxDelay; i++ {
 		d *= 2
 	}
-	if d > watchRetryMaxDelay {
-		d = watchRetryMaxDelay
+	if d > maxDelay {
+		d = maxDelay
 	}
 	return time.Duration(float64(d) * (0.8 + 0.4*rand.Float64())) //nolint:gosec // jitter for retry timing, not a security-sensitive value
 }
@@ -716,7 +743,7 @@ func (s *State) watchRetryLoop(ctx context.Context) {
 		var timer *time.Timer
 		var wake <-chan struct{}
 		if next.IsZero() {
-			timer = time.NewTimer(watchRetryIdlePoll)
+			timer = time.NewTimer(watchDur(&watchRetryIdlePoll))
 		} else {
 			wait := max(time.Until(next), 0)
 			timer = time.NewTimer(wait)
@@ -868,7 +895,7 @@ func (s *State) scheduleHealthEmit() {
 	if s.watcher == nil {
 		return
 	}
-	time.AfterFunc(watchHealthEmitDelay, s.maybeEmitHealth)
+	time.AfterFunc(watchDur(&watchHealthEmitDelay), s.maybeEmitHealth)
 }
 
 // maybeEmitHealth pushes the current watcher status to SSE subscribers when

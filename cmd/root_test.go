@@ -1763,3 +1763,153 @@ func TestProbeServer_AppField(t *testing.T) {
 		})
 	}
 }
+
+func TestReload_RulesResolution(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwdSlash := filepath.ToSlash(cwd)
+	if err := os.WriteFile(filepath.Join(dir, ".mlignore"), []byte("docs/**\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pattern := cwdSlash + "/**/*.md"
+
+	var reloadBodies []map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_/api/status", func(w http.ResponseWriter, _ *http.Request) {
+		status := map[string]any{
+			"version": "0.2.0",
+			"pid":     1,
+			"app":     "ml",
+			"groups": []map[string]any{{
+				"name":  "default",
+				"files": []map[string]any{},
+				"patterns": []string{
+					pattern,              // reloadable
+					"/other/dir/**/*.md", // other base, skipped client-side
+				},
+				"patternFilters": []map[string]any{
+					{
+						"pattern": pattern,
+						"group":   "default",
+						"rules": map[string]any{
+							"base":         cwdSlash,
+							"ignoreFile":   ".mlignore",
+							"flagExcludes": []string{"vendor/**"},
+						},
+					},
+					{
+						"pattern": "/other/dir/**/*.md",
+						"group":   "default",
+						"rules":   map[string]any{"base": "/other/dir", "ignoreFile": ".mlignore", "flagExcludes": []string{}},
+					},
+					{
+						// ml ≤ 0.1.0 shape: no provenance, cannot be reloaded.
+						"pattern": cwdSlash + "/legacy/**/*.md",
+						"group":   "default",
+						"rules":   map[string]any{"base": cwdSlash},
+					},
+				},
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(status) //nolint:errcheck
+	})
+	mux.HandleFunc("POST /_/api/reload", func(w http.ResponseWriter, r *http.Request) {
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("failed to read body: %v", err)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(data, &body); err != nil {
+			t.Errorf("failed to decode body: %v", err)
+		}
+		reloadBodies = append(reloadBodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(server.ReloadResponse{Patterns: 1}) //nolint:errcheck
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	addr := strings.TrimPrefix(ts.URL, "http://")
+
+	t.Run("keeps stored flags, rereads ignore file", func(t *testing.T) {
+		reloadBodies = nil
+		oldExcludes := excludes
+		oldHidden := includeHidden
+		defer func() { excludes, includeHidden = oldExcludes, oldHidden }()
+		excludes = []string{"vendor/**"}
+		includeHidden = false
+
+		if err := doReload(addr, false, false); err != nil {
+			t.Fatal(err)
+		}
+		if len(reloadBodies) != 1 {
+			t.Fatalf("got %d reload requests, want 1", len(reloadBodies))
+		}
+		filters, ok := reloadBodies[0]["filters"].([]any)
+		if !ok || len(filters) != 1 {
+			t.Fatalf("body filters = %v, want exactly the reloadable pattern", reloadBodies[0]["filters"])
+		}
+		filter, ok := filters[0].(map[string]any)
+		if !ok {
+			t.Fatalf("filter entry is not an object: %v", filters[0])
+		}
+		if filter["pattern"] != pattern || filter["group"] != "default" {
+			t.Fatalf("got filter %v, want pattern %s in group default", filter, pattern)
+		}
+		rules, ok := filter["rules"].(map[string]any)
+		if !ok {
+			t.Fatalf("filter rules are not an object: %v", filter["rules"])
+		}
+		if rules["base"] != cwdSlash {
+			t.Fatalf("rules base = %v, want %s", rules["base"], cwdSlash)
+		}
+		// File lines first, then the stored --exclude values.
+		wantExcludes := []any{"docs/**", "vendor/**"}
+		gotExcludes, ok := rules["excludes"].([]any)
+		if !ok || !slices.Equal(gotExcludes, wantExcludes) {
+			t.Fatalf("rules excludes = %v, want %v", rules["excludes"], wantExcludes)
+		}
+		if rules["ignoreFile"] != ".mlignore" {
+			t.Fatalf("rules ignoreFile = %v, want .mlignore", rules["ignoreFile"])
+		}
+		if !slices.Equal(stringSlice(rules["flagExcludes"]), []string{"vendor/**"}) {
+			t.Fatalf("rules flagExcludes = %v, want [vendor/**]", rules["flagExcludes"])
+		}
+		// includeHidden is omitempty, so false arrives as JSON-absent.
+		if v, ok := rules["includeHidden"].(bool); ok && v {
+			t.Fatalf("rules includeHidden = %v, want false (unchanged)", rules["includeHidden"])
+		}
+	})
+
+	t.Run("exclude flag replaces stored values only when changed", func(t *testing.T) {
+		reloadBodies = nil
+		oldExcludes := excludes
+		oldHidden := includeHidden
+		defer func() { excludes, includeHidden = oldExcludes, oldHidden }()
+		excludes = []string{"other/**"}
+		includeHidden = true
+
+		if err := doReload(addr, true, true); err != nil {
+			t.Fatal(err)
+		}
+		rules, ok := reloadBodies[0]["filters"].([]any)[0].(map[string]any)["rules"].(map[string]any)
+		if !ok {
+			t.Fatal("filter rules are not an object")
+		}
+		wantExcludes := []any{"docs/**", "other/**"}
+		gotExcludes, ok := rules["excludes"].([]any)
+		if !ok || !slices.Equal(gotExcludes, wantExcludes) {
+			t.Fatalf("rules excludes = %v, want %v", rules["excludes"], wantExcludes)
+		}
+		if !slices.Equal(stringSlice(rules["flagExcludes"]), []string{"other/**"}) {
+			t.Fatalf("rules flagExcludes = %v, want [other/**]", rules["flagExcludes"])
+		}
+		if rules["includeHidden"] != true {
+			t.Fatalf("rules includeHidden = %v, want true (flag given)", rules["includeHidden"])
+		}
+	})
+}

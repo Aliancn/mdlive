@@ -21,12 +21,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bmatcuk/doublestar/v4"
-	"github.com/fswatcher/fswatcher"
-	"github.com/k1LoW/donegroup"
 	"github.com/Aliancn/mdlive/internal/ignore"
 	"github.com/Aliancn/mdlive/internal/static"
 	"github.com/Aliancn/mdlive/version"
+	"github.com/bmatcuk/doublestar/v4"
+	"github.com/fswatcher/fswatcher"
+	"github.com/k1LoW/donegroup"
 	"golang.org/x/text/collate"
 	"golang.org/x/text/language"
 )
@@ -919,6 +919,17 @@ func expandPatternMatches(gp *GlobPattern) ([]string, PatternStats, error) {
 	}
 	collate.New(language.Und, collate.Numeric).SortStrings(matches)
 	return matches, stats, nil
+}
+
+// FileCount returns the total number of file entries across all groups.
+func (s *State) FileCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, g := range s.groups {
+		n += len(g.Files)
+	}
+	return n
 }
 
 // Patterns returns a copy of all registered glob patterns.
@@ -1928,6 +1939,7 @@ func NewHandler(state *State) http.Handler {
 	mux.HandleFunc("POST /_/api/patterns", handleAddPattern(state))
 	mux.HandleFunc("DELETE /_/api/patterns", handleRemovePattern(state))
 	mux.HandleFunc("POST /_/api/watcher/retry", handleWatcherRetry(state))
+	mux.HandleFunc("POST /_/api/reload", handleReload(state))
 	mux.HandleFunc("POST /_/api/restart", handleRestart(state))
 	mux.HandleFunc("POST /_/api/shutdown", handleShutdown(state))
 	mux.HandleFunc("GET /_/api/status", handleStatus(state))

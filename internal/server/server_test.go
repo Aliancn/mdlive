@@ -3895,20 +3895,28 @@ func TestRestoreData_PatternFiltersRoundTrip(t *testing.T) {
 // test-sized values and restores the originals via t.Cleanup.
 func shrinkRetryTimings(t *testing.T) {
 	t.Helper()
-	oldBase, oldMax := watchRetryBaseDelay, watchRetryMaxDelay
-	oldAfter, oldOpenFor := watchBreakerAfter, watchBreakerOpenFor
-	watchRetryBaseDelay, watchRetryMaxDelay = 20*time.Millisecond, 80*time.Millisecond
-	watchBreakerAfter, watchBreakerOpenFor = 3, 100*time.Millisecond
+	oldBase, oldMax := watchRetryBaseDelay.Load(), watchRetryMaxDelay.Load()
+	oldAfter, oldOpenFor := watchBreakerAfter.Load(), watchBreakerOpenFor.Load()
+	watchRetryBaseDelay.Store(int64(20 * time.Millisecond))
+	watchRetryMaxDelay.Store(int64(80 * time.Millisecond))
+	watchBreakerAfter.Store(3)
+	watchBreakerOpenFor.Store(int64(100 * time.Millisecond))
 	t.Cleanup(func() {
-		watchRetryBaseDelay, watchRetryMaxDelay = oldBase, oldMax
-		watchBreakerAfter, watchBreakerOpenFor = oldAfter, oldOpenFor
+		watchRetryBaseDelay.Store(oldBase)
+		watchRetryMaxDelay.Store(oldMax)
+		watchBreakerAfter.Store(oldAfter)
+		watchBreakerOpenFor.Store(oldOpenFor)
 	})
 }
 
 func TestWatchBackoffDelay(t *testing.T) {
-	oldBase, oldMax := watchRetryBaseDelay, watchRetryMaxDelay
-	watchRetryBaseDelay, watchRetryMaxDelay = time.Second, 8*time.Second
-	t.Cleanup(func() { watchRetryBaseDelay, watchRetryMaxDelay = oldBase, oldMax })
+	oldBase, oldMax := watchRetryBaseDelay.Load(), watchRetryMaxDelay.Load()
+	watchRetryBaseDelay.Store(int64(time.Second))
+	watchRetryMaxDelay.Store(int64(8 * time.Second))
+	t.Cleanup(func() {
+		watchRetryBaseDelay.Store(oldBase)
+		watchRetryMaxDelay.Store(oldMax)
+	})
 
 	for range 50 {
 		if d := watchBackoffDelay(1); d < 800*time.Millisecond || d > 1200*time.Millisecond {
@@ -4049,11 +4057,11 @@ func TestCircuitBreaker_OpensAndHalfOpens(t *testing.T) {
 	shrinkRetryTimings(t)
 	s := newTestState(t)
 
-	for i := 0; i < watchBreakerAfter; i++ {
+	for i := 0; i < int(watchBreakerAfter.Load()); i++ {
 		s.recordWatchFailure(watchKindFile, "/a.md", errors.New("boom"))
 	}
 	if st := s.WatcherStatus(); !st.CircuitOpen {
-		t.Fatalf("breaker did not open after %d consecutive failures: %+v", watchBreakerAfter, st)
+		t.Fatalf("breaker did not open after %d consecutive failures: %+v", watchBreakerAfter.Load(), st)
 	}
 
 	// While the breaker is open, due retries are held back.
@@ -4084,8 +4092,9 @@ func TestCircuitBreaker_OpensAndHalfOpens(t *testing.T) {
 	until := s.health.circuitUntil
 	s.mu.RUnlock()
 	d := time.Until(until)
-	if d <= watchBreakerOpenFor || d > 2*watchBreakerOpenFor+50*time.Millisecond {
-		t.Fatalf("re-open duration %v, want ~2x %v", d, watchBreakerOpenFor)
+	openFor := watchDur(&watchBreakerOpenFor)
+	if d <= openFor || d > 2*openFor+50*time.Millisecond {
+		t.Fatalf("re-open duration %v, want ~2x %v", d, openFor)
 	}
 
 	// A success closes the breaker and resets the consecutive count.
@@ -4105,9 +4114,9 @@ func TestHealthSSEEvent_OnTransition(t *testing.T) {
 	// Push the first retry beyond the test horizon so the background loop
 	// cannot cancel the failure before its health event is emitted; the
 	// transitions under test are driven explicitly below.
-	oldBase := watchRetryBaseDelay
-	watchRetryBaseDelay = time.Hour
-	t.Cleanup(func() { watchRetryBaseDelay = oldBase })
+	oldBase := watchRetryBaseDelay.Load()
+	watchRetryBaseDelay.Store(int64(time.Hour))
+	t.Cleanup(func() { watchRetryBaseDelay.Store(oldBase) })
 	ctx, cancel := donegroup.WithCancel(context.Background())
 	defer cancel()
 	s := NewState(ctx)
@@ -4143,5 +4152,311 @@ func waitForWatcherEvent(t *testing.T, s *State, ch chan sseEvent, wantStatus st
 		if time.Now().After(deadline) {
 			t.Fatalf("no %q watcher event within deadline; last status %+v", wantStatus, s.WatcherStatus())
 		}
+	}
+}
+
+func TestReloadPattern_DropsNowExcludedEntries(t *testing.T) {
+	dir := t.TempDir()
+	writeFilterTree(t, dir)
+	pattern := filepath.Join(dir, "**", "*.md")
+	s := newTestState(t)
+
+	oldRules := ignore.Rules{Base: dir}
+	if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, oldRules); err != nil {
+		t.Fatal(err)
+	}
+	// writeFilterTree holds three non-hidden markdown files; the default
+	// hidden-path rule already excluded .hidden.md and .git/g.md.
+	if got := len(groupFilePaths(s, DefaultGroup)); got != 3 {
+		t.Fatalf("before reload: %d files, want 3", got)
+	}
+
+	newRules := ignore.Rules{Base: dir, Excludes: []string{"docs/**"}}
+	res, err := s.ReloadPattern(pattern, DefaultGroup, newRules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Removed != 1 || res.Added != 0 || res.Unchanged != 2 {
+		t.Fatalf("got %+v, want removed=1 unchanged=2", res)
+	}
+	paths := groupFilePaths(s, DefaultGroup)
+	if len(paths) != 2 {
+		t.Fatalf("after reload: %v, want a.md and vendor/v.md", paths)
+	}
+	if !slices.Contains(paths, filepath.Join(dir, "a.md")) ||
+		!slices.Contains(paths, filepath.Join(dir, "vendor", "v.md")) {
+		t.Fatalf("after reload: %v, want a.md and vendor/v.md", paths)
+	}
+}
+
+func TestReloadPattern_KeepsExplicitlyAddedEntries(t *testing.T) {
+	dir := t.TempDir()
+	writeFilterTree(t, dir)
+	pattern := filepath.Join(dir, "**", "*.md")
+	s := newTestState(t)
+
+	// The file is added explicitly while a filter already rejects it.
+	excludedRules := ignore.Rules{Base: dir, Excludes: []string{"docs/**"}}
+	if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, excludedRules); err != nil {
+		t.Fatal(err)
+	}
+	explicit := filepath.Join(dir, "docs", "d.md")
+	if _, err := s.AddFile(explicit, DefaultGroup); err != nil {
+		t.Fatal(err)
+	}
+
+	// A reload with the same rules must not drop the explicit entry.
+	res, err := s.ReloadPattern(pattern, DefaultGroup, excludedRules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Removed != 0 {
+		t.Fatalf("got %+v, want no removals", res)
+	}
+	if !slices.Contains(groupFilePaths(s, DefaultGroup), explicit) {
+		t.Fatal("explicitly added file was dropped by reload")
+	}
+
+	// Widening the rules must not drop it either.
+	if _, err := s.ReloadPattern(pattern, DefaultGroup, ignore.Rules{Base: dir}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(groupFilePaths(s, DefaultGroup), explicit) {
+		t.Fatal("explicitly added file was dropped by widening reload")
+	}
+}
+
+func TestReloadPattern_AddsNewlyAdmittedFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeFilterTree(t, dir)
+	pattern := filepath.Join(dir, "**", "*.md")
+	s := newTestState(t)
+
+	restricted := ignore.Rules{Base: dir, Excludes: []string{"docs/**", "vendor/**"}}
+	if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, restricted); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.ReloadPattern(pattern, DefaultGroup, ignore.Rules{Base: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Added != 2 || res.Removed != 0 {
+		t.Fatalf("got %+v, want added=2 (docs/d.md and vendor/v.md)", res)
+	}
+	paths := groupFilePaths(s, DefaultGroup)
+	if !slices.Contains(paths, filepath.Join(dir, "docs", "d.md")) ||
+		!slices.Contains(paths, filepath.Join(dir, "vendor", "v.md")) {
+		t.Fatalf("newly admitted files missing after reload: %v", paths)
+	}
+}
+
+func TestReloadPattern_LeavesWatchesIntact(t *testing.T) {
+	forceRootWatch(t)
+	dir := t.TempDir()
+	writeFilterTree(t, dir)
+	pattern := filepath.Join(dir, "**", "*.md")
+	ctx, cancel := donegroup.WithCancel(context.Background())
+	defer cancel()
+	s := NewState(ctx)
+
+	if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, ignore.Rules{Base: dir}); err != nil {
+		t.Fatal(err)
+	}
+	before := s.WatcherStatus()
+
+	// Metadata-only rule change (ignore-file provenance): the evaluation is
+	// identical, so no entry may be dropped or added and no watch rebuilt.
+	res, err := s.ReloadPattern(pattern, DefaultGroup, ignore.Rules{Base: dir, IgnoreFile: ".mlignore"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Removed != 0 || res.Added != 0 {
+		t.Fatalf("metadata-only reload changed entries: %+v", res)
+	}
+	after := s.WatcherStatus()
+	if after.Roots != before.Roots || after.DirWatches != before.DirWatches || after.FileWatches != before.FileWatches {
+		t.Fatalf("watches changed across reload: before %+v, after %+v", before, after)
+	}
+	if after.Status != "healthy" {
+		t.Fatalf("watcher degraded after reload: %+v", after)
+	}
+}
+
+func TestHandleReload_ResponseShape(t *testing.T) {
+	dir := t.TempDir()
+	writeFilterTree(t, dir)
+	pattern := filepath.Join(dir, "**", "*.md")
+	s := newTestState(t)
+	if _, _, err := s.AddPatternWithRules(pattern, DefaultGroup, ignore.Rules{Base: dir}); err != nil {
+		t.Fatal(err)
+	}
+
+	body, err := json.Marshal(ReloadRequest{Filters: []PatternFilterData{{
+		Pattern: pattern,
+		Group:   DefaultGroup,
+		Rules:   ignore.Rules{Base: dir, Excludes: []string{"docs/**"}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/_/api/reload", bytes.NewReader(body))
+	handleReload(s)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var resp ReloadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Patterns != 1 || resp.Removed != 1 || resp.Unchanged != 2 || resp.Skipped != 0 {
+		t.Fatalf("got %+v, want patterns=1 removed=1 unchanged=2 skipped=0", resp)
+	}
+	if resp.Files != len(groupFilePaths(s, DefaultGroup)) {
+		t.Fatalf("files=%d, want %d", resp.Files, len(groupFilePaths(s, DefaultGroup)))
+	}
+}
+
+func TestHandleReload_SkipsUnknownPattern(t *testing.T) {
+	s := newTestState(t)
+	body, err := json.Marshal(ReloadRequest{Filters: []PatternFilterData{{
+		Pattern: "/nonexistent/**/*.md",
+		Group:   DefaultGroup,
+		Rules:   ignore.Rules{Base: "/nonexistent"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/_/api/reload", bytes.NewReader(body))
+	handleReload(s)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var resp ReloadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Skipped != 1 || resp.Patterns != 0 {
+		t.Fatalf("got %+v, want skipped=1 patterns=0", resp)
+	}
+}
+
+func TestHandleStatus_IncludesAppAndWatcher(t *testing.T) {
+	s := newTestState(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/_/api/status", nil)
+	handleStatus(s)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	var resp StatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.App != AppName {
+		t.Fatalf("got app=%q, want %q", resp.App, AppName)
+	}
+	if resp.Watcher.Status != "healthy" {
+		t.Fatalf("got watcher %+v, want healthy", resp.Watcher)
+	}
+}
+
+func TestHandleVersion_IncludesApp(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/_/api/version", nil)
+	handleVersion()(rec, req)
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["app"] != AppName {
+		t.Fatalf("got app=%q, want %q", resp["app"], AppName)
+	}
+}
+
+func TestHandleWatcherRetry_ClearsBreaker(t *testing.T) {
+	shrinkRetryTimings(t)
+	s := newTestState(t)
+	for range int(watchBreakerAfter.Load()) {
+		s.recordWatchFailure(watchKindFile, "/a.md", errors.New("boom"))
+	}
+	if st := s.WatcherStatus(); !st.CircuitOpen {
+		t.Fatalf("breaker did not open: %+v", st)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/_/api/watcher/retry", nil)
+	handleWatcherRetry(s)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	var st WatcherStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.CircuitOpen {
+		t.Fatalf("retry response still reports an open breaker: %+v", st)
+	}
+}
+
+func TestRules_SplitMetadataRoundTrip(t *testing.T) {
+	rules := ignore.Rules{
+		Base:          "/repo",
+		Excludes:      []string{"docs/**", "vendor/**"},
+		IncludeHidden: true,
+		IgnoreFile:    ".mlignore",
+		FlagExcludes:  []string{"vendor/**"},
+	}
+	f, err := rules.Filter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := f.Rules()
+	if got.IgnoreFile != rules.IgnoreFile || !slices.Equal(got.FlagExcludes, rules.FlagExcludes) {
+		t.Fatalf("metadata lost across Filter/Rules: %+v", got)
+	}
+	// Evaluation semantics stay identical.
+	gotF, err := got.Filter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotF.ForPattern("**/*.md", "/repo").AdmitsFile("/repo/docs/d.md") {
+		t.Fatal("rules evaluate differently after round trip")
+	}
+
+	// JSON round trip keeps the metadata.
+	data, err := json.Marshal(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back ignore.Rules
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.IgnoreFile != rules.IgnoreFile || !slices.Equal(back.FlagExcludes, rules.FlagExcludes) {
+		t.Fatalf("metadata lost across JSON: %+v", back)
+	}
+}
+
+func TestRules_JSONWithoutNewFields(t *testing.T) {
+	// A 0.1.0-shaped rules object must unmarshal unchanged: no ignore file,
+	// no flag excludes.
+	var rules ignore.Rules
+	if err := json.Unmarshal([]byte(`{"base":"/repo","excludes":["vendor/**"],"includeHidden":true}`), &rules); err != nil {
+		t.Fatal(err)
+	}
+	if rules.IgnoreFile != "" || rules.FlagExcludes != nil {
+		t.Fatalf("legacy JSON picked up metadata: %+v", rules)
+	}
+	// Evaluation is untouched.
+	f, err := rules.Filter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pat := f.ForPattern("**/*.md", "/repo")
+	if !pat.AdmitsFile("/repo/a.md") || pat.AdmitsFile("/repo/vendor/v.md") {
+		t.Fatal("legacy rules evaluate differently")
 	}
 }
