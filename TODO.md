@@ -8,17 +8,9 @@ remove them here as they land.
 
 Convenience gaps in the current file list design.
 
-- [ ] **Reveal the active file.** When the active file changes via search
-  results or in-document links, the sidebar neither scrolls to it nor
-  expands its collapsed ancestors in tree view — with many files the
-  highlight is off-screen and the user hunts for it manually.
 - [ ] **Search in tree view filters the tree.** While searching, tree view
   is replaced by a flat filtered list (`Sidebar.tsx`); a tree-shaped result
   (matches with their ancestor chain expanded) would preserve context.
-- [ ] **Duplicate-name disambiguation in flat view.** Two `README.md` in
-  different directories are indistinguishable except on hover (title
-  attribute). `FileEntry.segments` is already sent by the server; show a
-  secondary directory line or a path suffix.
 - [ ] **Close others / close all** in the file context menu (kebab).
 - [ ] **Multi-select with bulk actions** (close, move to group). Today
   every operation is one file at a time.
@@ -33,9 +25,6 @@ Convenience gaps in the current file list design.
 - [ ] **Add-files button.** A "+" that opens a file picker and uploads via
   the existing `/_/api/groups/{group}/files/upload` endpoint (drag-and-drop
   is the only path today).
-- [ ] **Kebab menu reachable without hover.** The menu button is
-  `opacity-0` until `group-hover` — keyboard and touch users cannot open
-  it at all. Show it on the active row and on focus, not only on hover.
 - [ ] **New-file indicator.** Files added by watch patterns get no visual
   distinction; a dot until first viewed would make "what just appeared"
   legible.

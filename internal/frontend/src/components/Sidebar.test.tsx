@@ -378,4 +378,180 @@ describe("Sidebar", () => {
     await user.click(screen.getByRole("button", { name: /content matches/i }));
     expect(screen.getByText(hasTextContent("cache line"))).toBeInTheDocument();
   });
+
+  it("scrolls the active file into view when it changes", async () => {
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = vi.fn();
+    const view = (activeFileId: string | null) => (
+      <Sidebar
+        groups={groups}
+        activeGroup="default"
+        activeFileId={activeFileId}
+        onFileSelect={() => {}}
+        onFilesReorder={() => {}}
+        viewMode="flat"
+        showTitle={false}
+        searchQuery={null}
+        onSearchQueryChange={() => {}}
+      />
+    );
+    const { rerender } = render(view("aaa11111"));
+    vi.mocked(Element.prototype.scrollIntoView).mockClear();
+    rerender(view("bbb22222"));
+    await vi.waitFor(() => {
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+    });
+    Element.prototype.scrollIntoView = original;
+  });
+
+  it("keeps the file menu visible on the active row without hover", () => {
+    render(
+      <Sidebar
+        groups={groups}
+        activeGroup="default"
+        activeFileId="aaa11111"
+        onFileSelect={() => {}}
+        onFilesReorder={() => {}}
+        viewMode="flat"
+        showTitle={false}
+        searchQuery={null}
+        onSearchQueryChange={() => {}}
+      />,
+    );
+    const menus = screen.getAllByTitle("More actions");
+    expect(menus).toHaveLength(2);
+    // The active row's menu is always visible; other rows show it on hover
+    // or keyboard focus.
+    expect(menus[0].className).toContain("opacity-100");
+    expect(menus[0].className).not.toContain("opacity-0");
+    expect(menus[1].className).toContain("opacity-0");
+  });
+
+  it("shows the directory for duplicate file names in flat view", () => {
+    const dupGroups: Group[] = [
+      {
+        name: "default",
+        files: [
+          {
+            id: "dup1",
+            name: "README.md",
+            path: "/a/README.md",
+            segments: ["a", "README.md"],
+          },
+          {
+            id: "dup2",
+            name: "README.md",
+            path: "/b/README.md",
+            segments: ["b", "README.md"],
+          },
+          {
+            id: "uniq",
+            name: "GUIDE.md",
+            path: "/a/GUIDE.md",
+            segments: ["a", "GUIDE.md"],
+          },
+        ],
+      },
+    ];
+    render(
+      <Sidebar
+        groups={dupGroups}
+        activeGroup="default"
+        activeFileId={null}
+        onFileSelect={() => {}}
+        onFilesReorder={() => {}}
+        viewMode="flat"
+        showTitle={false}
+        searchQuery={null}
+        onSearchQueryChange={() => {}}
+      />,
+    );
+    expect(screen.getAllByText("README.md")).toHaveLength(2);
+    // Duplicate rows show their directory as a second line...
+    expect(screen.getByText("a")).toBeInTheDocument();
+    expect(screen.getByText("b")).toBeInTheDocument();
+    // ...unique names do not.
+    expect(screen.getByText("GUIDE.md").closest("a")?.textContent).toBe("GUIDE.md");
+  });
+
+  it("collapses and expands all directories in tree view", async () => {
+    const user = userEvent.setup();
+    const nestedGroups: Group[] = [
+      {
+        name: "default",
+        files: [
+          {
+            id: "nested1",
+            name: "deep.md",
+            path: "/repo/docs/guide/deep.md",
+            segments: ["repo", "docs", "guide", "deep.md"],
+          },
+          {
+            id: "root1",
+            name: "README.md",
+            path: "/repo/README.md",
+            segments: ["repo", "README.md"],
+          },
+        ],
+      },
+    ];
+    render(
+      <Sidebar
+        groups={nestedGroups}
+        activeGroup="default"
+        activeFileId="root1"
+        onFileSelect={() => {}}
+        onFilesReorder={() => {}}
+        viewMode="tree"
+        showTitle={false}
+        searchQuery={null}
+        onSearchQueryChange={() => {}}
+      />,
+    );
+    expect(screen.getByText("deep.md")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Collapse all" }));
+    expect(screen.queryByText("deep.md")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Expand all" }));
+    expect(screen.getByText("deep.md")).toBeInTheDocument();
+  });
+
+  it("expands collapsed ancestors of the active file in tree view", () => {
+    const nestedGroups: Group[] = [
+      {
+        name: "default",
+        files: [
+          {
+            id: "nested1",
+            name: "deep.md",
+            path: "/repo/docs/guide/deep.md",
+            segments: ["repo", "docs", "guide", "deep.md"],
+          },
+          {
+            id: "root1",
+            name: "README.md",
+            path: "/repo/README.md",
+            segments: ["repo", "README.md"],
+          },
+        ],
+      },
+    ];
+    localStorage.setItem("ml-sidebar-tree-collapsed", JSON.stringify({ default: ["docs/guide"] }));
+    render(
+      <Sidebar
+        groups={nestedGroups}
+        activeGroup="default"
+        activeFileId="nested1"
+        onFileSelect={() => {}}
+        onFilesReorder={() => {}}
+        viewMode="tree"
+        showTitle={false}
+        searchQuery={null}
+        onSearchQueryChange={() => {}}
+      />,
+    );
+    // The saved collapse state is overridden for the active file's ancestors.
+    expect(screen.getByText("deep.md")).toBeInTheDocument();
+  });
 });

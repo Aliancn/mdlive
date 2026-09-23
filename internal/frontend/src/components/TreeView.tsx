@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FileEntry, Group } from "../hooks/useApi";
 import { buildTree, type TreeNode } from "../utils/buildTree";
 import { buildFileUrl } from "../utils/groups";
@@ -7,6 +7,38 @@ import { FileContextMenu } from "./FileContextMenu";
 import { FileIcon } from "./FileIcon";
 
 const COLLAPSED_STORAGE_KEY = "ml-sidebar-tree-collapsed";
+
+// Returns the fullPath of every directory node on the way down to the file,
+// or null when the file is not in the tree.
+function ancestorPathsOf(
+  node: TreeNode,
+  fileId: string,
+  ancestors: string[] = [],
+): string[] | null {
+  if (node.file != null) {
+    return node.file.id === fileId ? ancestors : null;
+  }
+  const next = node.fullPath ? [...ancestors, node.fullPath] : ancestors;
+  for (const child of node.children) {
+    const found = ancestorPathsOf(child, fileId, next);
+    if (found != null) return found;
+  }
+  return null;
+}
+
+// Collects the fullPath of every directory node in the tree.
+function collectDirPaths(node: TreeNode, paths: string[] = []): string[] {
+  for (const child of node.children) {
+    if (child.file == null) {
+      paths.push(child.fullPath);
+      collectDirPaths(child, paths);
+    }
+  }
+  return paths;
+}
+
+const TREE_CONTROL_CLASS =
+  "flex items-center justify-center bg-transparent border border-gh-border rounded-md p-1 cursor-pointer text-gh-text-secondary hover:bg-gh-bg-hover hover:text-gh-text transition-colors duration-150";
 
 function getInitialCollapsed(group: string): Set<string> {
   try {
@@ -88,8 +120,76 @@ export function TreeView({
     });
   }, []);
 
+  // When the active file changes (deep link, search result, in-document
+  // link), expand its collapsed ancestors so the row is visible — the
+  // sidebar scrolls it into view. Only navigation re-expands: later tree
+  // changes leave whatever the user collapsed alone.
+  const prevActiveFileId = useRef<string | null>(null);
+  useEffect(() => {
+    if (prevActiveFileId.current === activeFileId) return;
+    prevActiveFileId.current = activeFileId;
+    if (activeFileId == null) return;
+    const ancestors = ancestorPathsOf(tree, activeFileId);
+    if (ancestors == null) return;
+    setCollapsedPaths((prev) => {
+      const hidden = ancestors.filter((p) => prev.has(p));
+      if (hidden.length === 0) return prev;
+      const next = new Set(prev);
+      for (const path of hidden) {
+        next.delete(path);
+      }
+      return next;
+    });
+  }, [activeFileId, tree]);
+
+  const allDirPaths = useMemo(() => collectDirPaths(tree), [tree]);
+
   return (
     <>
+      {allDirPaths.length > 0 && (
+        <div className="flex justify-end gap-1 px-2 pt-1">
+          <button
+            type="button"
+            className={TREE_CONTROL_CLASS}
+            onClick={() => setCollapsedPaths(new Set())}
+            aria-label="Expand all"
+            title="Expand all"
+          >
+            <svg
+              className="size-3.5"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 3.5 8 8l5-4.5" />
+              <path d="M3 8.5 8 13l5-4.5" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className={TREE_CONTROL_CLASS}
+            onClick={() => setCollapsedPaths(new Set(allDirPaths))}
+            aria-label="Collapse all"
+            title="Collapse all"
+          >
+            <svg
+              className="size-3.5"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 3l5 5-5 5" />
+              <path d="M8 3l5 5-5 5" />
+            </svg>
+          </button>
+        </div>
+      )}
       {tree.children.map((node) => (
         <TreeNodeItem
           key={node.fullPath}
@@ -297,6 +397,7 @@ function FileNodeItem({
       <FileContextMenu
         file={file}
         isOpen={menuOpenId === file.id}
+        isActive={isActive}
         otherGroups={otherGroups}
         onToggle={onMenuToggle}
         onOpenInNewTab={onOpenInNewTab}
