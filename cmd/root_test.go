@@ -1780,6 +1780,7 @@ func TestReload_RulesResolution(t *testing.T) {
 	pattern := cwdSlash + "/**/*.md"
 
 	var reloadBodies []map[string]any
+	reloadResponse := server.ReloadResponse{Patterns: 1}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /_/api/status", func(w http.ResponseWriter, _ *http.Request) {
 		status := map[string]any{
@@ -1795,8 +1796,9 @@ func TestReload_RulesResolution(t *testing.T) {
 				},
 				"patternFilters": []map[string]any{
 					{
+						// Real status payloads nest filters per group and (up
+						// to 0.1.2) omit the per-filter group field.
 						"pattern": pattern,
-						"group":   "default",
 						"rules": map[string]any{
 							"base":         cwdSlash,
 							"ignoreFile":   ".mlignore",
@@ -1805,13 +1807,11 @@ func TestReload_RulesResolution(t *testing.T) {
 					},
 					{
 						"pattern": "/other/dir/**/*.md",
-						"group":   "default",
 						"rules":   map[string]any{"base": "/other/dir", "ignoreFile": ".mlignore", "flagExcludes": []string{}},
 					},
 					{
 						// ml ≤ 0.1.0 shape: no provenance, cannot be reloaded.
 						"pattern": cwdSlash + "/legacy/**/*.md",
-						"group":   "default",
 						"rules":   map[string]any{"base": cwdSlash},
 					},
 				},
@@ -1831,7 +1831,7 @@ func TestReload_RulesResolution(t *testing.T) {
 		}
 		reloadBodies = append(reloadBodies, body)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(server.ReloadResponse{Patterns: 1}) //nolint:errcheck
+		json.NewEncoder(w).Encode(reloadResponse) //nolint:errcheck
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
@@ -1912,6 +1912,24 @@ func TestReload_RulesResolution(t *testing.T) {
 		}
 		if rules["includeHidden"] != true {
 			t.Fatalf("rules includeHidden = %v, want true (flag given)", rules["includeHidden"])
+		}
+	})
+
+	t.Run("warns when the server skips patterns", func(t *testing.T) {
+		oldResponse := reloadResponse
+		defer func() { reloadResponse = oldResponse }()
+		reloadResponse = server.ReloadResponse{Patterns: 0, Skipped: 2}
+
+		captured := captureStderr(t, func() {
+			if err := doReload(addr, false, false); err != nil {
+				t.Error(err)
+			}
+		})
+		if !strings.Contains(captured, "2 pattern(s) were skipped") {
+			t.Fatalf("stderr %q lacks the skipped warning", captured)
+		}
+		if !strings.Contains(captured, "reloaded 0 pattern(s)") {
+			t.Fatalf("stderr %q lacks the summary", captured)
 		}
 	})
 }

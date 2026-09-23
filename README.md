@@ -212,6 +212,7 @@ Notes:
 
 - Patterns registered from a different working directory are skipped — run `ml --reload` from that directory.
 - Patterns registered by ml ≤ 0.1.0 cannot be reloaded (their `.mlignore` lines and flag values cannot be told apart); re-register them to apply the new rules.
+- Patterns the server skips (no longer registered, or not reloadable) are reported with a warning line; the remaining patterns still reload.
 - Without a running ml server there is nothing to reload, and the command says so.
 
 ### Sidebar view modes

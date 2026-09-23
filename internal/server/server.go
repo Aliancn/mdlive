@@ -964,7 +964,7 @@ func (s *State) PatternFiltersForGroup(groupName string) []PatternFilterData {
 		if p.Group != groupName || p.rules.Empty() {
 			continue
 		}
-		result = append(result, PatternFilterData{Pattern: p.Pattern, Rules: p.rules})
+		result = append(result, PatternFilterData{Pattern: p.Pattern, Group: p.Group, Rules: p.rules})
 	}
 	return result
 }
