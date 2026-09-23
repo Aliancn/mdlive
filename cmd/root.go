@@ -1545,9 +1545,16 @@ func doReload(addr string, excludeChanged, includeHiddenChanged bool) error {
 				legacyCount++
 				continue
 			}
+			group := pf.Group
+			if group == "" {
+				// The filters are nested per group in the status payload;
+				// servers up to 0.1.2 omit the per-filter group field, so
+				// fall back to the enclosing group.
+				group = g.Name
+			}
 			filters = append(filters, server.PatternFilterData{
 				Pattern: pf.Pattern,
-				Group:   pf.Group,
+				Group:   group,
 				Rules:   rules,
 			})
 		}
@@ -1587,6 +1594,10 @@ func doReload(addr string, excludeChanged, includeHiddenChanged bool) error {
 
 	fmt.Fprintf(os.Stderr, "ml: reloaded %d pattern(s): added %d, removed %d, unchanged %d (%d excluded)\n",
 		out.Patterns, out.Added, out.Removed, out.Unchanged, out.Excluded)
+	if out.Skipped > 0 {
+		fmt.Fprintf(os.Stderr, "ml: warning: %d pattern(s) were skipped by the server (no longer registered or not reloadable); re-register them to apply the new rules\n",
+			out.Skipped)
+	}
 	for i, p := range out.RemovedPaths {
 		if i >= 5 {
 			fmt.Fprintf(os.Stderr, "  … and %d more removed file(s) — use --json to list every path\n", len(out.RemovedPaths)-i)

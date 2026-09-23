@@ -3687,6 +3687,27 @@ func TestAddPatternWithRules(t *testing.T) {
 			t.Fatalf("got %d patterns, want 0 after failed registration", len(s.Patterns()))
 		}
 	})
+
+	t.Run("filters carry their group", func(t *testing.T) {
+		s := newTestState(t)
+		rules := ignore.Rules{Base: dir, Excludes: []string{"vendor/**"}}
+		if _, _, err := s.AddPatternWithRules(pattern, "design", rules); err != nil {
+			t.Fatalf("AddPatternWithRules returned error: %v", err)
+		}
+		// Rules-less patterns produce no filter entry.
+		if _, _, err := s.AddPatternWithRules(filepath.Join(dir, "docs", "*.md"), DefaultGroup, ignore.Rules{}); err != nil {
+			t.Fatalf("AddPatternWithRules returned error: %v", err)
+		}
+		filters := s.PatternFiltersForGroup("design")
+		if len(filters) != 1 {
+			t.Fatalf("got %d filters, want 1", len(filters))
+		}
+		// Without the group the CLI cannot round-trip the filter through
+		// status into POST /_/api/reload (issue #8).
+		if filters[0].Group != "design" {
+			t.Fatalf("filter group = %q, want design", filters[0].Group)
+		}
+	})
 }
 
 func TestWalkSymlinkTree_Prune(t *testing.T) {
