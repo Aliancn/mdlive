@@ -1337,7 +1337,13 @@ func (s *State) watchLoop() {
 						s.noteRootLoss(eventPath)
 					}
 				}
-				if event.Op.Has(fswatcher.Create) {
+				// FSEvents reports a rename as Rename (no Create), so a
+				// populated directory renamed into a watched tree — or a
+				// directory renamed within it — arrives here without the
+				// Create flag. Scan the path on Rename as well: missing
+				// paths (rename-out) are skipped by the stat inside, and
+				// rename-in brings its pre-existing children along.
+				if event.Op.Has(fswatcher.Create) || event.Op.Has(fswatcher.Rename) {
 					s.handleCreateForGlobs(eventPath)
 				}
 			}

@@ -2258,6 +2258,58 @@ func TestHandleCreateForGlobs_RootScanAddsPreExistingChildren(t *testing.T) {
 	}
 }
 
+// The watch loop itself must route the event: FSEvents reports a rename as
+// Rename with no Create flag, so the loop's create-scan branch has to fire
+// for Rename too or a populated directory renamed into a watched tree is
+// never scanned (its children never reach the sidebar).
+func TestWatchLoop_RenameInPopulatedDirUnderRoot(t *testing.T) {
+	forceRootWatch(t)
+	ctx, cancel := donegroup.WithCancel(context.Background())
+	defer cancel()
+
+	s := NewState(ctx)
+	t.Cleanup(s.CloseAllSubscribers)
+
+	dir := t.TempDir()
+	if _, err := s.AddPattern(filepath.Join(dir, "**", "*.md"), DefaultGroup); err != nil {
+		t.Fatalf("AddPattern returned error: %v", err)
+	}
+
+	// A populated directory prepared outside the watched tree, renamed in.
+	outside := t.TempDir()
+	populated := filepath.Join(outside, "arrived")
+	if err := os.Mkdir(populated, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(populated, "b.md"), []byte("# b"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(dir, "arrived")
+	if err := os.Rename(populated, moved); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForFilePath(t, s, filepath.Join(moved, "b.md"))
+
+	// Renaming it back out must not resurrect stale entries either: the
+	// Rename now points at a missing path, which the scan skips.
+	if err := os.Rename(moved, populated); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		if s.FindFile(FileID(filepath.Join(moved, "b.md")), DefaultGroup) == nil {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("entry for %q still present after rename-out", filepath.Join(moved, "b.md"))
+		default:
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // Atomic saves (write tmp + rename) must not drop covered files from the
 // list, and the replacement file must still reach live-reload through the
 // covering root instead of a re-registered per-file watch.
