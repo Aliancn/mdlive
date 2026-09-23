@@ -2664,6 +2664,14 @@ func handleSSE(state *State) http.HandlerFunc {
 		// Send server identity on connection
 		fmt.Fprintf(w, "event: started\ndata: {\"pid\":%d}\n\n", os.Getpid())
 		flusher.Flush()
+		// Immediately follow with the current watcher health, so a client
+		// that connects while the watcher is degraded sees it at once.
+		if st := state.WatcherStatus(); st.Status != "" {
+			if b, err := json.Marshal(st); err == nil {
+				fmt.Fprintf(w, "event: watcher\ndata: %s\n\n", b)
+				flusher.Flush()
+			}
+		}
 
 		ctx := r.Context()
 		for {

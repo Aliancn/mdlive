@@ -12,6 +12,11 @@
   --color-gh-header-bg: #f6f8fa;
   --color-gh-header-text: #1f2328;
   --color-gh-header-border: #d0d7de;
+  /* GitHub "attention" palette, for the watcher-degraded banner. */
+  --color-gh-attention-bg: #fff8c5;
+  --color-gh-attention-border: #d4a72c;
+  --color-gh-attention-text: #1f2328;
+  --color-gh-attention-icon: #9a6700;
 }
 
 [data-theme="light"] {
@@ -31,6 +36,10 @@
   --color-gh-header-bg: #161b22;
   --color-gh-header-text: #e6edf3;
   --color-gh-header-border: #30363d;
+  --color-gh-attention-bg: #bb800926;
+  --color-gh-attention-border: #9e6a03;
+  --color-gh-attention-text: #e6edf3;
+  --color-gh-attention-icon: #d4a72c;
 }
 
 html,

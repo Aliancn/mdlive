@@ -6,6 +6,8 @@ import {
   reorderFiles,
   moveFile,
   uploadFile,
+  fetchWatcherStatus,
+  retryWatchers,
 } from "./useApi";
 
 beforeEach(() => {
@@ -224,5 +226,95 @@ describe("uploadFile", () => {
     await expect(uploadFile("test.md", "# Hello", "default")).rejects.toThrow(
       "Failed to upload file",
     );
+  });
+});
+
+describe("fetchWatcherStatus", () => {
+  it("returns the watcher field on success", async () => {
+    const watcher = {
+      status: "healthy",
+      roots: 1,
+      dirWatches: 0,
+      fileWatches: 0,
+      failed: 0,
+      pendingRetries: 0,
+      circuitOpen: false,
+      totalFailures: 0,
+      totalRecovered: 0,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ app: "ml", version: "0.2.0", watcher }),
+      }),
+    );
+
+    const result = await fetchWatcherStatus();
+    expect(result).toEqual(watcher);
+    expect(fetch).toHaveBeenCalledWith("/_/api/status");
+  });
+
+  it("throws on error response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+      }),
+    );
+
+    await expect(fetchWatcherStatus()).rejects.toThrow("Failed to fetch watcher status");
+  });
+
+  it("throws when an older server reports no watcher field", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ version: "0.1.0" }),
+      }),
+    );
+
+    await expect(fetchWatcherStatus()).rejects.toThrow("Server does not report watcher status");
+  });
+});
+
+describe("retryWatchers", () => {
+  it("posts to the retry endpoint and returns the status", async () => {
+    const watcher = {
+      status: "healthy",
+      roots: 1,
+      dirWatches: 0,
+      fileWatches: 0,
+      failed: 0,
+      pendingRetries: 0,
+      circuitOpen: false,
+      totalFailures: 1,
+      totalRecovered: 1,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(watcher),
+      }),
+    );
+
+    const result = await retryWatchers();
+    expect(result).toEqual(watcher);
+    expect(fetch).toHaveBeenCalledWith("/_/api/watcher/retry", { method: "POST" });
+  });
+
+  it("throws on error response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+      }),
+    );
+
+    await expect(retryWatchers()).rejects.toThrow("Failed to retry watcher registrations");
   });
 });

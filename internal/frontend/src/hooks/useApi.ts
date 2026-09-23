@@ -23,6 +23,24 @@ export interface FileContent {
 export interface VersionInfo {
   version: string;
   revision: string;
+  /** Server identity ("ml"); absent on servers older than 0.2.0. */
+  app?: string;
+}
+
+/** Health of the server's file watcher, as reported by the watcher API. */
+export interface WatcherStatus {
+  status: "healthy" | "degraded";
+  roots: number;
+  dirWatches: number;
+  fileWatches: number;
+  failed: number;
+  pendingRetries: number;
+  circuitOpen: boolean;
+  totalFailures: number;
+  totalRecovered: number;
+  lastError?: string;
+  lastErrorPath?: string;
+  lastErrorAt?: string;
 }
 
 export interface SearchAnchor {
@@ -138,6 +156,21 @@ export async function restartServer(): Promise<void> {
 export async function fetchVersion(): Promise<VersionInfo> {
   const res = await fetch("/_/api/version");
   if (!res.ok) throw new Error("Failed to fetch version");
+  return res.json();
+}
+
+export async function fetchWatcherStatus(): Promise<WatcherStatus> {
+  const res = await fetch("/_/api/status");
+  if (!res.ok) throw new Error("Failed to fetch watcher status");
+  const data = await res.json();
+  // Older servers report no watcher field.
+  if (data?.watcher == null) throw new Error("Server does not report watcher status");
+  return data.watcher as WatcherStatus;
+}
+
+export async function retryWatchers(): Promise<WatcherStatus> {
+  const res = await fetch("/_/api/watcher/retry", { method: "POST" });
+  if (!res.ok) throw new Error("Failed to retry watcher registrations");
   return res.json();
 }
 

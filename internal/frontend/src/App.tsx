@@ -15,11 +15,12 @@ import type { ZoomContent } from "./components/ZoomModal";
 import { TocPanel } from "./components/TocPanel";
 import type { TocHeading } from "./components/TocPanel";
 import { EmptyGroupMessage } from "./components/EmptyGroupMessage";
+import { WatcherBanner } from "./components/WatcherBanner";
 import { useSSE } from "./hooks/useSSE";
 import { useFileDrop } from "./hooks/useFileDrop";
 import { useActiveHeading } from "./hooks/useActiveHeading";
 import { useScrollRestoration, SCROLL_SESSION_KEY } from "./hooks/useScrollRestoration";
-import type { FileEntry, Group, SearchResult } from "./hooks/useApi";
+import type { FileEntry, Group, SearchResult, WatcherStatus } from "./hooks/useApi";
 import {
   fetchGroups,
   fetchSearchResults,
@@ -72,9 +73,9 @@ export function getInitialTocOpenMap(): Record<string, boolean> {
 }
 
 export function formatTitle(fileEntry: Pick<FileEntry, "name" | "title"> | undefined): string {
-  if (fileEntry == undefined) return "mo";
+  if (fileEntry == undefined) return "ml";
   const { name, title } = fileEntry;
-  return `${formatFileLabel(name, title)} | mo`;
+  return `${formatFileLabel(name, title)} | ml`;
 }
 
 export function isTocOpenForFile(
@@ -145,6 +146,8 @@ export function App() {
   });
   const [scrollContainer, setScrollContainer] = useState<HTMLDivElement | null>(null);
   const [zoomContent, setZoomContent] = useState<ZoomContent | null>(null);
+  const [watcherStatus, setWatcherStatus] = useState<WatcherStatus | null>(null);
+  const [watcherDismissed, setWatcherDismissed] = useState(false);
 
   // Track previous values for render-time state adjustment
   const [prevGroups, setPrevGroups] = useState<Group[]>([]);
@@ -344,6 +347,12 @@ export function App() {
         return current;
       });
     },
+    onWatcherStatus: (status) => {
+      setWatcherStatus(status);
+      // A status change is new information; a previously dismissed banner
+      // should reappear on a fresh degraded report.
+      setWatcherDismissed(false);
+    },
   });
 
   const { isDragging } = useFileDrop(activeGroup);
@@ -520,6 +529,9 @@ export function App() {
           <ThemeToggle />
         </div>
       </header>
+      {!watcherDismissed && (
+        <WatcherBanner status={watcherStatus} onClose={() => setWatcherDismissed(true)} />
+      )}
       <div className="flex flex-1 overflow-hidden">
         {sidebarOpen && (
           <Sidebar

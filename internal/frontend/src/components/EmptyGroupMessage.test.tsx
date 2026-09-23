@@ -19,7 +19,7 @@ beforeEach(() => {
     configurable: true,
   });
 
-  // Pretend the SPA is served on the default mo port unless a test overrides it.
+  // Pretend the SPA is served on the default ml port unless a test overrides it.
   setLocationPort("6275");
 });
 
@@ -80,54 +80,54 @@ describe("EmptyGroupMessage", () => {
     render(<EmptyGroupMessage group={group} />);
 
     expect(screen.getByText("No file in this group.")).toBeInTheDocument();
-    expect(commandFor("/abs/foo/")).toBe("mo --unwatch '/abs/foo/*.md'");
-    expect(commandFor("/abs/bar/")).toBe("mo --unwatch '/abs/bar/**/*.md'");
+    expect(commandFor("/abs/foo/")).toBe("ml --unwatch '/abs/foo/*.md'");
+    expect(commandFor("/abs/bar/")).toBe("ml --unwatch '/abs/bar/**/*.md'");
   });
 
   it("appends -t <group> for a non-default group name", () => {
     const group = makeGroup({ name: "design", patterns: ["/abs/d/*.md"] });
     render(<EmptyGroupMessage group={group} />);
-    expect(commandFor("/abs/d/")).toBe("mo --unwatch '/abs/d/*.md' -t design");
+    expect(commandFor("/abs/d/")).toBe("ml --unwatch '/abs/d/*.md' -t design");
   });
 
   it("appends -p <port> when the server is on a non-default port", () => {
     setLocationPort("16275");
     const group = makeGroup({ patterns: ["/abs/foo/*.md"] });
     render(<EmptyGroupMessage group={group} />);
-    expect(commandFor("/abs/foo/")).toBe("mo --unwatch '/abs/foo/*.md' -p 16275");
+    expect(commandFor("/abs/foo/")).toBe("ml --unwatch '/abs/foo/*.md' -p 16275");
   });
 
   it("combines -t and -p when both apply", () => {
     setLocationPort("16275");
     const group = makeGroup({ name: "design", patterns: ["/abs/d/*.md"] });
     render(<EmptyGroupMessage group={group} />);
-    expect(commandFor("/abs/d/")).toBe("mo --unwatch '/abs/d/*.md' -t design -p 16275");
+    expect(commandFor("/abs/d/")).toBe("ml --unwatch '/abs/d/*.md' -t design -p 16275");
   });
 
   it("omits both flags for the default group on the default port", () => {
     const group = makeGroup({ patterns: ["/abs/foo/*.md"] });
     render(<EmptyGroupMessage group={group} />);
-    expect(commandFor("/abs/foo/")).toBe("mo --unwatch '/abs/foo/*.md'");
+    expect(commandFor("/abs/foo/")).toBe("ml --unwatch '/abs/foo/*.md'");
   });
 
   it("leaves a plain pattern unquoted when no shell metacharacters are present", () => {
     const group = makeGroup({ patterns: ["/abs/foo.md"] });
     render(<EmptyGroupMessage group={group} />);
-    expect(commandFor("/abs/foo.md")).toBe("mo --unwatch /abs/foo.md");
+    expect(commandFor("/abs/foo.md")).toBe("ml --unwatch /abs/foo.md");
   });
 
   it("quotes patterns containing spaces", () => {
     const pattern = "/abs/dir with space/*.md";
     const group = makeGroup({ patterns: [pattern] });
     render(<EmptyGroupMessage group={group} />);
-    expect(commandFor("dir with space")).toBe(`mo --unwatch '${pattern}'`);
+    expect(commandFor("dir with space")).toBe(`ml --unwatch '${pattern}'`);
   });
 
   it("escapes embedded single quotes using the POSIX '\\'' pattern", () => {
     const pattern = "/abs/with'quote/*.md";
     const group = makeGroup({ patterns: [pattern] });
     render(<EmptyGroupMessage group={group} />);
-    expect(commandFor("with")).toBe("mo --unwatch '/abs/with'\\''quote/*.md'");
+    expect(commandFor("with")).toBe("ml --unwatch '/abs/with'\\''quote/*.md'");
   });
 
   it("copies the rendered command to the clipboard when the copy button is clicked", async () => {
@@ -139,7 +139,7 @@ describe("EmptyGroupMessage", () => {
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledTimes(1);
     });
-    expect(writeText).toHaveBeenCalledWith("mo --unwatch '/abs/foo/*.md'");
+    expect(writeText).toHaveBeenCalledWith("ml --unwatch '/abs/foo/*.md'");
     expect(await screen.findByRole("button", { name: "Command copied" })).toBeInTheDocument();
   });
 });
