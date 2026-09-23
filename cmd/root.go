@@ -75,6 +75,7 @@ var (
 	clearBackup                  bool
 	pruneMode                    bool
 	pruneBackups                 bool
+	verbose                      bool
 	jsonOutput                   bool
 	dangerouslyAllowRemoteAccess bool
 	reloadMode                   bool
@@ -244,6 +245,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&pruneMode, "prune", false, "Remove log files of servers that are no longer running")
 	rootCmd.Flags().BoolVar(&pruneBackups, "prune-backups", false, "With --prune, also remove saved sessions of stopped servers (asks for confirmation)")
 	rootCmd.Flags().BoolVar(&reloadMode, "reload", false, "Re-apply .mlignore and --exclude rules to patterns registered from the current directory")
+	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "List every deeplink and print the full startup summary")
 	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output structured data as JSON to stdout")
 	rootCmd.Flags().BoolVar(&dangerouslyAllowRemoteAccess, "dangerously-allow-remote-access", false, "Allow remote access without authentication. Recommended only for trusted networks.")
 	rootCmd.Flags().StringArrayVar(&excludes, "exclude", nil, "Glob pattern of files to exclude from discovery (repeatable)")
@@ -421,7 +423,7 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 		if err != nil {
 			return fmt.Errorf("failed to restore state: %w", err)
 		}
-		return startServer(cmd.Context(), addr, filesByGroup, restorePatternSpecs(patternsByGroup, patternFilters), uploadedFiles)
+		return startServer(cmd.Context(), addr, filesByGroup, restorePatternSpecs(patternsByGroup, patternFilters), uploadedFiles, serveSummaryData{})
 	}
 
 	resolved, err := server.ResolveGroupName(target)
@@ -591,10 +593,38 @@ func run(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
-	if foreground {
-		return startServer(cmd.Context(), addr, filesByGroup, specsByGroup, uploadedFiles)
+	// The startup summary reports what came from the backup and what came
+	// from this invocation; the server side only sees the merged result.
+	summary := serveSummaryData{
+		RestoredFiles:    countGroupFiles(restoredFiles),
+		RestoredPatterns: countGroupPatterns(restoredSpecs),
+		AddedFromArgs:    len(files) + len(patternSpecs),
 	}
-	return startBackground(addr, filesByGroup, specsByGroup, uploadedFiles)
+	if stdinData != nil {
+		summary.AddedFromArgs++
+	}
+	if foreground {
+		return startServer(cmd.Context(), addr, filesByGroup, specsByGroup, uploadedFiles, summary)
+	}
+	return startBackground(addr, filesByGroup, specsByGroup, uploadedFiles, summary)
+}
+
+// countGroupFiles sums the file counts of a group → paths map.
+func countGroupFiles(filesByGroup map[string][]string) int {
+	n := 0
+	for _, files := range filesByGroup {
+		n += len(files)
+	}
+	return n
+}
+
+// countGroupPatterns sums the pattern counts of a group → specs map.
+func countGroupPatterns(specsByGroup map[string][]patternSpec) int {
+	n := 0
+	for _, specs := range specsByGroup {
+		n += len(specs)
+	}
+	return n
 }
 
 // mergeGroups merges base and additional group maps, with base entries first.
@@ -1179,11 +1209,23 @@ func deeplinkDisplayNames(entries []deeplinkEntry) []string {
 	return displayNames(pathEntries)
 }
 
+// deeplinkVerboseLimit is how many deeplinks print in full before the list
+// truncates with a hint. Sessions opened with one or a few files — the common
+// case — always print every link.
+const deeplinkVerboseLimit = 10
+
 func printDeeplinks(entries []deeplinkEntry) {
 	if len(entries) == 0 {
 		return
 	}
 	names := deeplinkDisplayNames(entries)
+	if len(entries) > deeplinkVerboseLimit && !verbose {
+		for i := range 3 {
+			fmt.Printf("  %s  %s\n", entries[i].URL, names[i])
+		}
+		fmt.Fprintf(os.Stderr, "ml: … and %d more file(s) — re-run with --verbose to list every link\n", len(entries)-3)
+		return
+	}
 	for i, e := range entries {
 		fmt.Printf("  %s  %s\n", e.URL, names[i])
 	}
@@ -1202,6 +1244,86 @@ func emitServeOutput(addr string, deeplinks []deeplinkEntry, printURL bool) {
 			fmt.Fprintf(os.Stdout, "http://%s\n", addr)
 		}
 		printDeeplinks(deeplinks)
+	}
+}
+
+// largePattern thresholds: a pattern expanding beyond them risks exhausting
+// the OS watch limit, which on macOS surfaces as "FSEventStreamStart failed".
+var (
+	watchSummaryWarnFiles = 5000
+	watchSummaryWarnDirs  = 1000
+	watchSummaryWarnTotal = 2000 // combined, only when symlinks are involved
+)
+
+// warnLargePattern tells the user up front when one pattern's discovery tree
+// is big enough to be at risk, while there is still time to add a .mlignore.
+func warnLargePattern(pattern string, stats server.PatternStats) {
+	total := stats.Dirs + stats.Files
+	symlinked := stats.SymlinkedDirs + stats.SymlinkedFiles
+	if stats.Dirs <= watchSummaryWarnDirs && stats.Files <= watchSummaryWarnFiles &&
+		(symlinked == 0 || total <= watchSummaryWarnTotal) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "ml: WARNING: %s expands to %d entries (%d dirs, %d files), %d of them reached through symlinks.\n",
+		pattern, total, stats.Dirs, stats.Files, symlinked)
+	fmt.Fprintf(os.Stderr, "    Large trees multiply watcher registrations and can exhaust OS limits (on macOS: \"FSEventStreamStart failed\").\n")
+	fmt.Fprintf(os.Stderr, "    Add a .mlignore with one line per external tree (e.g. \"external-repo/**\") and re-run, or watch a narrower pattern.\n")
+	slog.Warn("large pattern expansion may exhaust the OS watch limit", "pattern", pattern, "dirs", stats.Dirs, "files", stats.Files, "symlinked", symlinked)
+}
+
+// serveSummaryData carries what the startup summary reports. Zero-valued
+// fields print nothing, so the background parent (which does not know the
+// restore counts) can reuse the same printer as the foreground server.
+type serveSummaryData struct {
+	PID              int
+	RestoredFiles    int
+	RestoredPatterns int
+	AddedFromArgs    int
+	Groups           int
+	Files            int
+	Patterns         int
+	ScannedDirs      int
+	ScannedFiles     int
+	Symlinked        int
+	Excluded         int
+	Watcher          *server.WatcherStatus
+}
+
+// printServeSummary writes the startup summary to stderr. stdout stays
+// machine-readable (URL and deeplinks only).
+func printServeSummary(addr string, d serveSummaryData) {
+	fmt.Fprintf(os.Stderr, "ml: serving at http://%s (pid %d)\n", addr, d.PID)
+	if d.RestoredFiles > 0 || d.RestoredPatterns > 0 {
+		line := fmt.Sprintf("ml: restored %d file(s) and %d pattern(s) from the previous session", d.RestoredFiles, d.RestoredPatterns)
+		if d.AddedFromArgs > 0 {
+			line += fmt.Sprintf("; %d file(s) added from arguments", d.AddedFromArgs)
+		}
+		fmt.Fprintln(os.Stderr, line)
+	}
+	if d.Groups > 0 || d.Files > 0 || d.Patterns > 0 {
+		fmt.Fprintf(os.Stderr, "ml: %d group(s), %d file(s), %d pattern(s)", d.Groups, d.Files, d.Patterns)
+		if d.Watcher != nil && d.Watcher.Status != "" {
+			fmt.Fprintf(os.Stderr, "; watcher: %d root, %d dir, %d file", d.Watcher.Roots, d.Watcher.DirWatches, d.Watcher.FileWatches)
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+	if d.ScannedDirs > 0 || d.ScannedFiles > 0 {
+		line := fmt.Sprintf("ml: scanned %d dir(s) / %d file(s)", d.ScannedDirs, d.ScannedFiles)
+		if d.Symlinked > 0 {
+			line += fmt.Sprintf(" — %d reached through symlinks", d.Symlinked)
+		}
+		fmt.Fprintln(os.Stderr, line)
+	}
+	if d.Excluded > 0 {
+		fmt.Fprintf(os.Stderr, "ml: %d file(s) excluded by .mlignore/--exclude\n", d.Excluded)
+	}
+	if d.Watcher != nil && d.Watcher.Status == "degraded" {
+		msg := fmt.Sprintf("ml: watcher degraded: %d registration(s) failed", d.Watcher.Failed)
+		if d.Watcher.LastError != "" {
+			msg += " (" + d.Watcher.LastError + ")"
+		}
+		msg += "; retrying"
+		fmt.Fprintln(os.Stderr, msg)
 	}
 }
 
@@ -1934,7 +2056,7 @@ func confirmRemove(action string) bool {
 	return ans == "" || strings.EqualFold(ans, "y") || strings.EqualFold(ans, "yes")
 }
 
-func startServer(ctx context.Context, addr string, filesByGroup map[string][]string, specsByGroup map[string][]patternSpec, uploadedFiles []server.UploadedFileData) error {
+func startServer(ctx context.Context, addr string, filesByGroup map[string][]string, specsByGroup map[string][]patternSpec, uploadedFiles []server.UploadedFileData, summary serveSummaryData) error {
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -1980,12 +2102,17 @@ func startServer(ctx context.Context, addr string, filesByGroup map[string][]str
 	var patternsAdded int
 	for group, specs := range specsByGroup {
 		for _, spec := range specs {
-			entries, _, err := state.AddPatternWithRules(spec.Pattern, group, spec.Rules)
+			entries, stats, err := state.AddPatternWithRules(spec.Pattern, group, spec.Rules)
 			if err != nil {
 				slog.Warn("failed to add pattern", "pattern", spec.Pattern, "error", err)
 				continue
 			}
 			patternsAdded++
+			summary.ScannedDirs += stats.Dirs
+			summary.ScannedFiles += stats.Files
+			summary.Symlinked += stats.SymlinkedDirs + stats.SymlinkedFiles
+			summary.Excluded += stats.Excluded
+			warnLargePattern(spec.Pattern, stats)
 			for _, entry := range entries {
 				deeplinks = append(deeplinks, deeplinkEntry{
 					URL:  buildDeeplink(addr, group, entry.ID),
@@ -2020,6 +2147,16 @@ func startServer(ctx context.Context, addr string, filesByGroup map[string][]str
 	}
 
 	emitServeOutput(addr, deeplinks, true)
+	if summary.PID == 0 {
+		summary.PID = os.Getpid()
+	}
+	summary.Groups = len(state.Groups())
+	summary.Files = state.FileCount()
+	summary.Patterns = len(state.Patterns())
+	if st := state.WatcherStatus(); st.Status != "" {
+		summary.Watcher = &st
+	}
+	printServeSummary(addr, summary)
 
 	if err := donegroup.Cleanup(ctx, func() error {
 		state.CloseAllSubscribers()
@@ -2084,7 +2221,7 @@ func spawnNewProcess(addr string, restoreFile string) (*os.Process, error) {
 	return cmd.Process, nil
 }
 
-func startBackground(addr string, filesByGroup map[string][]string, specsByGroup map[string][]patternSpec, uploadedFiles []server.UploadedFileData) error {
+func startBackground(addr string, filesByGroup map[string][]string, specsByGroup map[string][]patternSpec, uploadedFiles []server.UploadedFileData, summary serveSummaryData) error {
 	patternsByGroup := make(map[string][]string, len(specsByGroup))
 	var patternFilters []server.PatternFilterData
 	for group, specs := range specsByGroup {
@@ -2150,7 +2287,19 @@ func startBackground(addr string, filesByGroup map[string][]string, specsByGroup
 		}
 	}
 	emitServeOutput(addr, deeplinks, true)
-	fmt.Fprintf(os.Stderr, "ml: serving at http://%s (pid %d)\n", addr, pid)
+	if status != nil {
+		summary.PID = pid
+		summary.Groups = len(status.Groups)
+		for _, g := range status.Groups {
+			summary.Files += len(g.Files)
+			summary.Patterns += len(g.Patterns)
+		}
+		if status.Watcher.Status != "" {
+			watcher := status.Watcher
+			summary.Watcher = &watcher
+		}
+	}
+	printServeSummary(addr, summary)
 
 	openBrowser(addr)
 

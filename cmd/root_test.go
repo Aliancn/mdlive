@@ -2173,3 +2173,146 @@ func newStatusMux(status map[string]any) *http.ServeMux {
 	})
 	return mux
 }
+
+func TestEmitServeOutput_VerboseElision(t *testing.T) {
+	many := make([]deeplinkEntry, 0, 12)
+	for i := range 12 {
+		many = append(many, deeplinkEntry{
+			URL:  fmt.Sprintf("http://localhost:6275/?file=%02d", i),
+			Path: fmt.Sprintf("/home/user/f%02d.md", i),
+		})
+	}
+	few := many[:2]
+
+	t.Run("more than ten entries elides to three plus a hint", func(t *testing.T) {
+		verbose = false
+		defer func() { verbose = false }()
+		jsonOutput = false
+
+		out := captureStdout(t, func() {
+			emitServeOutput("localhost:6275", many, true)
+		})
+		stderr := captureStderr(t, func() {
+			printDeeplinks(many)
+		})
+
+		if got := strings.Count(out, "http://localhost:6275/?file="); got != 3 {
+			t.Fatalf("stdout lists %d links, want 3 (elided):\n%s", got, out)
+		}
+		if !strings.Contains(stderr, "and 9 more file(s)") || !strings.Contains(stderr, "--verbose") {
+			t.Fatalf("stderr lacks the elision hint:\n%s", stderr)
+		}
+	})
+
+	t.Run("verbose lists every link", func(t *testing.T) {
+		verbose = true
+		defer func() { verbose = false }()
+		jsonOutput = false
+
+		out := captureStdout(t, func() {
+			emitServeOutput("localhost:6275", many, true)
+		})
+		if got := strings.Count(out, "http://localhost:6275/?file="); got != 12 {
+			t.Fatalf("stdout lists %d links, want 12:\n%s", got, out)
+		}
+	})
+
+	t.Run("few entries are never elided", func(t *testing.T) {
+		verbose = false
+		defer func() { verbose = false }()
+		jsonOutput = false
+
+		out := captureStdout(t, func() {
+			emitServeOutput("localhost:6275", few, true)
+		})
+		if got := strings.Count(out, "http://localhost:6275/?file="); got != 2 {
+			t.Fatalf("stdout lists %d links, want 2:\n%s", got, out)
+		}
+	})
+}
+
+func TestServeSummary_Text(t *testing.T) {
+	t.Run("full summary with degraded watcher", func(t *testing.T) {
+		d := serveSummaryData{
+			PID:              4821,
+			RestoredFiles:    216,
+			RestoredPatterns: 2,
+			AddedFromArgs:    12,
+			Groups:           2,
+			Files:            742,
+			Patterns:         1,
+			ScannedDirs:      4700,
+			ScannedFiles:     742,
+			Symlinked:        4383,
+			Excluded:         30,
+			Watcher:          &server.WatcherStatus{Status: "degraded", Failed: 2, LastError: "FSEventStreamStart failed"},
+		}
+		out := captureStderr(t, func() {
+			printServeSummary("localhost:6275", d)
+		})
+		for _, want := range []string{
+			"ml: serving at http://localhost:6275 (pid 4821)",
+			"ml: restored 216 file(s) and 2 pattern(s) from the previous session; 12 file(s) added from arguments",
+			"ml: 2 group(s), 742 file(s), 1 pattern(s); watcher: 0 root, 0 dir, 0 file",
+			"ml: scanned 4700 dir(s) / 742 file(s) — 4383 reached through symlinks",
+			"ml: 30 file(s) excluded by .mlignore/--exclude",
+			"ml: watcher degraded: 2 registration(s) failed (FSEventStreamStart failed); retrying",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("summary lacks %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("zero fields print nothing", func(t *testing.T) {
+		out := captureStderr(t, func() {
+			printServeSummary("localhost:6275", serveSummaryData{PID: 7})
+		})
+		if !strings.Contains(out, "ml: serving at http://localhost:6275 (pid 7)") {
+			t.Fatalf("summary lacks the serving line:\n%s", out)
+		}
+		for _, unexpected := range []string{"restored", "scanned", "excluded", "watcher"} {
+			if strings.Contains(out, unexpected) {
+				t.Fatalf("summary unexpectedly mentions %q:\n%s", unexpected, out)
+			}
+		}
+	})
+}
+
+func TestWarnLargePattern(t *testing.T) {
+	oldFiles, oldDirs, oldTotal := watchSummaryWarnFiles, watchSummaryWarnDirs, watchSummaryWarnTotal
+	watchSummaryWarnFiles, watchSummaryWarnDirs, watchSummaryWarnTotal = 5000, 1000, 2000
+	defer func() {
+		watchSummaryWarnFiles, watchSummaryWarnDirs, watchSummaryWarnTotal = oldFiles, oldDirs, oldTotal
+	}()
+
+	t.Run("small tree is silent", func(t *testing.T) {
+		out := captureStderr(t, func() {
+			warnLargePattern("docs/**/*.md", server.PatternStats{Dirs: 100, Files: 200})
+		})
+		if out != "" {
+			t.Fatalf("unexpected warning:\n%s", out)
+		}
+	})
+
+	t.Run("huge tree warns", func(t *testing.T) {
+		out := captureStderr(t, func() {
+			warnLargePattern("docs/**/*.md", server.PatternStats{Dirs: 4700, Files: 742, SymlinkedDirs: 4383})
+		})
+		if !strings.Contains(out, "expands to 5442 entries (4700 dirs, 742 files), 4383 of them reached through symlinks") {
+			t.Fatalf("warning lacks the counts:\n%s", out)
+		}
+		if !strings.Contains(out, ".mlignore") {
+			t.Fatalf("warning lacks the remediation hint:\n%s", out)
+		}
+	})
+
+	t.Run("symlinked tree warns below the absolute thresholds", func(t *testing.T) {
+		out := captureStderr(t, func() {
+			warnLargePattern("docs/**/*.md", server.PatternStats{Dirs: 900, Files: 1200, SymlinkedDirs: 800})
+		})
+		if !strings.Contains(out, "expands to 2100 entries") {
+			t.Fatalf("symlink-heavy tree did not warn:\n%s", out)
+		}
+	})
+}
