@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fswatcher/fswatcher"
 	"github.com/k1LoW/donegroup"
 
 	"github.com/Aliancn/mdlive/internal/ignore"
@@ -46,6 +47,11 @@ func newTestState(t *testing.T) *State {
 		aliasReverse:       make(map[string]string),
 		watchedFiles:       make(map[string]int),
 		fileWatchTargets:   make(map[string]int),
+		roots:              make(map[string]int),
+		rootTargets:        make(map[string]int),
+		retainedRoots:      make(map[string]bool),
+		dirAliases:         make(map[string]int),
+		rootWatch:          watchRootsEnabled,
 		fileChangeDebounce: defaultFileChangeDebounce,
 		fileChangeTimers:   make(map[string]*time.Timer),
 	}
@@ -1914,6 +1920,400 @@ func TestWatchedFile_RetainedAfterAtomicSaveRewrite(t *testing.T) {
 	}
 }
 
+// forceRootWatch flips the root watch model on for the duration of the test,
+// so the recursive-root tests also exercise the root path on platforms that
+// default to the per-directory + per-file model (linux/freebsd CI).
+func forceRootWatch(t *testing.T) {
+	t.Helper()
+	old := watchRootsEnabled
+	watchRootsEnabled = true
+	t.Cleanup(func() { watchRootsEnabled = old })
+}
+
+// rootWatchTarget returns the canonical watch target for a root registered at
+// dir (on macOS, /var/... resolves to /private/var/...).
+func rootWatchTarget(dir string) string {
+	if canonical := resolvePathAlias(dir); canonical != "" {
+		return canonical
+	}
+	return dir
+}
+
+func TestRootWatch_CoveragePredicates(t *testing.T) {
+	forceRootWatch(t)
+	s := newTestState(t)
+
+	dir := filepath.FromSlash("/repo")
+	sub := filepath.Join(dir, "sub")
+	file := filepath.Join(sub, "a.md")
+
+	s.mu.Lock()
+	s.rootTargets[dir] = 1
+	s.mu.Unlock()
+
+	if !s.rootCovers(file) {
+		t.Errorf("rootCovers(%q) = false, want true (file under registered root)", file)
+	}
+	if !s.fileCovered(file) {
+		t.Errorf("fileCovered(%q) = false, want true (covered by root)", file)
+	}
+
+	// An alias spelling of the same file resolves through aliasReverse.
+	alias := filepath.FromSlash("/link/a.md")
+	s.mu.Lock()
+	s.registerPathAlias(alias, file)
+	s.mu.Unlock()
+	if !s.rootCovers(alias) {
+		t.Errorf("rootCovers(%q) = false, want true (alias of covered file)", alias)
+	}
+
+	// A watched parent directory covers direct children even without roots.
+	s2 := newTestState(t)
+	s2.mu.Lock()
+	s2.watchTargets[sub] = 1
+	s2.mu.Unlock()
+	if !s2.fileCovered(file) {
+		t.Errorf("fileCovered(%q) = false, want true (parent dir watched)", file)
+	}
+	deep := filepath.Join(sub, "nested", "b.md")
+	if s2.fileCovered(deep) {
+		t.Errorf("fileCovered(%q) = true, want false (depth-1 dir watch)", deep)
+	}
+
+	// The coverage model is off on per-entry platforms.
+	s.rootWatch = false
+	if s.fileCovered(file) {
+		t.Errorf("fileCovered(%q) = true with the root model disabled, want false", file)
+	}
+}
+
+func TestAddPattern_RecursiveRegistersSingleRoot(t *testing.T) {
+	forceRootWatch(t)
+	ctx, cancel := donegroup.WithCancel(context.Background())
+	defer cancel()
+
+	s := NewState(ctx)
+	t.Cleanup(s.CloseAllSubscribers)
+
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(sub, "a.md")
+	for _, name := range []string{filepath.Join(dir, "top.md"), nested} {
+		if err := os.WriteFile(name, []byte("# "+name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	entries, err := s.AddPattern(filepath.Join(dir, "**", "*.md"), DefaultGroup)
+	if err != nil {
+		t.Fatalf("AddPattern returned error: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+
+	target := rootWatchTarget(dir)
+	s.mu.RLock()
+	rootRefs, rootOK := s.roots[dir]
+	targetRefs, targetOK := s.rootTargets[target]
+	dirWatched := len(s.watchedDirs)
+	s.mu.RUnlock()
+	if !rootOK || rootRefs != 1 {
+		t.Errorf("roots[%q] = (%d, %v), want (1, true)", dir, rootRefs, rootOK)
+	}
+	if !targetOK || targetRefs != 1 {
+		t.Errorf("rootTargets[%q] = (%d, %v), want (1, true)", target, targetRefs, targetOK)
+	}
+	if dirWatched != 0 {
+		t.Errorf("got %d per-directory watch entries, want 0 under the root model", dirWatched)
+	}
+
+	// No file may be individually registered: the root covers them all.
+	if err := s.watcher.Remove(nested); !errors.Is(err, fswatcher.ErrNotAdded) {
+		t.Errorf("watcher.Remove(file) = %v, want ErrNotAdded (only the root is registered)", err)
+	}
+
+	ch := s.Subscribe()
+	defer s.Unsubscribe(ch)
+
+	// A write to a nested file still reaches live-reload through the root.
+	if err := os.WriteFile(nested, []byte("# changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForFileChanged(t, ch)
+
+	// A new file appears in the sidebar without any registration step.
+	if err := os.WriteFile(filepath.Join(dir, "new.md"), []byte("# new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForFilePath(t, s, filepath.Join(dir, "new.md"))
+}
+
+func TestAddPattern_TwoPatternsShareOneRoot(t *testing.T) {
+	forceRootWatch(t)
+	ctx, cancel := donegroup.WithCancel(context.Background())
+	defer cancel()
+
+	s := NewState(ctx)
+	t.Cleanup(s.CloseAllSubscribers)
+
+	dir := t.TempDir()
+	docs := filepath.Join(dir, "docs")
+	if err := os.Mkdir(docs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := filepath.Join(docs, "d.md")
+	for _, name := range []string{filepath.Join(dir, "a.md"), doc} {
+		if err := os.WriteFile(name, []byte("# x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The same pattern in two groups: both share the base directory, so a
+	// single root stream must serve them both.
+	if _, err := s.AddPattern(filepath.Join(dir, "**", "*.md"), DefaultGroup); err != nil {
+		t.Fatalf("AddPattern returned error: %v", err)
+	}
+	if _, err := s.AddPattern(filepath.Join(dir, "**", "*.md"), "docs"); err != nil {
+		t.Fatalf("AddPattern returned error: %v", err)
+	}
+
+	target := rootWatchTarget(dir)
+	s.mu.RLock()
+	rootRefs := s.roots[dir]
+	targetRefs := s.rootTargets[target]
+	s.mu.RUnlock()
+	if rootRefs != 2 || targetRefs != 1 {
+		t.Errorf("roots[%q] = %d, rootTargets[%q] = %d, want 2 and 1 (one shared stream)", dir, rootRefs, target, targetRefs)
+	}
+
+	// Removing one pattern must keep the shared root alive.
+	if !s.RemovePattern(filepath.Join(dir, "**", "*.md"), "docs") {
+		t.Fatal("RemovePattern returned false")
+	}
+	s.mu.RLock()
+	rootRefs, targetOK := s.roots[dir], s.rootTargets[target] > 0
+	s.mu.RUnlock()
+	if rootRefs != 1 || !targetOK {
+		t.Errorf("after removing one pattern: roots[%q] = %d, rootTargets kept = %v, want 1 and true", dir, rootRefs, targetOK)
+	}
+
+	ch := s.Subscribe()
+	defer s.Unsubscribe(ch)
+	if err := os.WriteFile(doc, []byte("# changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForFileChanged(t, ch)
+}
+
+// Removing a pattern must not kill live-reload for the entries it leaves in
+// the sidebar: under the root model those files have no watch of their own, so
+// the root stream is retained until the last of them is removed.
+func TestRemovePattern_RetainsRootWhileFilesRemain(t *testing.T) {
+	forceRootWatch(t)
+	ctx, cancel := donegroup.WithCancel(context.Background())
+	defer cancel()
+
+	s := NewState(ctx)
+	t.Cleanup(s.CloseAllSubscribers)
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.md")
+	if err := os.WriteFile(file, []byte("# a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := s.AddPattern(filepath.Join(dir, "**", "*.md"), DefaultGroup)
+	if err != nil {
+		t.Fatalf("AddPattern returned error: %v", err)
+	}
+	id := entries[0].ID
+	target := rootWatchTarget(dir)
+
+	if !s.RemovePattern(filepath.Join(dir, "**", "*.md"), DefaultGroup) {
+		t.Fatal("RemovePattern returned false")
+	}
+
+	s.mu.RLock()
+	retained := s.retainedRoots[target]
+	s.mu.RUnlock()
+	if !retained {
+		t.Fatalf("retainedRoots does not contain %q after RemovePattern, want the root retained while %q stays in the sidebar", target, file)
+	}
+
+	ch := s.Subscribe()
+	defer s.Unsubscribe(ch)
+	if err := os.WriteFile(file, []byte("# changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForFileChanged(t, ch)
+
+	// Closing the last file below the root releases the retained stream.
+	if !s.RemoveFile(id, DefaultGroup) {
+		t.Fatal("RemoveFile returned false")
+	}
+	s.mu.RLock()
+	retainedLen, targetGone := len(s.retainedRoots), s.rootTargets[target] == 0
+	s.mu.RUnlock()
+	if retainedLen != 0 || !targetGone {
+		t.Errorf("after removing the last file: retainedRoots = %d entries, rootTargets[%q] zeroed = %v, want 0 and true", retainedLen, target, targetGone)
+	}
+	if err := s.watcher.Remove(target); !errors.Is(err, fswatcher.ErrNotAdded) {
+		t.Errorf("watcher.Remove(root) = %v, want ErrNotAdded (stream was released)", err)
+	}
+}
+
+func TestDirMove_UnderRoot(t *testing.T) {
+	forceRootWatch(t)
+	ctx, cancel := donegroup.WithCancel(context.Background())
+	defer cancel()
+
+	s := NewState(ctx)
+	t.Cleanup(s.CloseAllSubscribers)
+
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(sub, "a.md")
+	if err := os.WriteFile(file, []byte("# a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := s.AddPattern(filepath.Join(dir, "**", "*.md"), DefaultGroup)
+	if err != nil {
+		t.Fatalf("AddPattern returned error: %v", err)
+	}
+	id := entries[0].ID
+	if s.FindFile(id, DefaultGroup) == nil {
+		t.Fatal("file entry missing after AddPattern")
+	}
+
+	// Renaming the directory makes every entry below it stale; the root model
+	// has no per-directory watch for sub, so the move must be detected via
+	// the tracked files under it.
+	if err := os.Rename(sub, filepath.Join(dir, "sub2")); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if s.FindFile(id, DefaultGroup) == nil {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("stale entry for %q still present after directory rename", file)
+		default:
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// A populated directory renamed into a watched tree is reported as a single
+// directory event; the root-model create path must scan its children instead
+// of only registering a watch for the directory itself.
+func TestHandleCreateForGlobs_RootScanAddsPreExistingChildren(t *testing.T) {
+	forceRootWatch(t)
+	ctx, cancel := donegroup.WithCancel(context.Background())
+	defer cancel()
+
+	s := NewState(ctx)
+	t.Cleanup(s.CloseAllSubscribers)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.md"), []byte("# a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddPattern(filepath.Join(dir, "**", "*.md"), DefaultGroup); err != nil {
+		t.Fatalf("AddPattern returned error: %v", err)
+	}
+
+	// A populated directory prepared outside the tree, moved in as a whole.
+	outside := t.TempDir()
+	populated := filepath.Join(outside, "brought")
+	if err := os.Mkdir(populated, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(populated, "b.md")
+	if err := os.WriteFile(inner, []byte("# b"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(dir, "brought")
+	if err := os.Rename(populated, moved); err != nil {
+		t.Fatal(err)
+	}
+
+	// This is what the watch loop's create path (and the atomic-save guard's
+	// directory branch) call for the moved-in directory.
+	s.handleCreateForGlobs(moved)
+	waitForFilePath(t, s, filepath.Join(moved, "b.md"))
+	if s.FindFile(FileID(inner), DefaultGroup) != nil {
+		t.Errorf("entry still exists for the pre-move path %q", inner)
+	}
+}
+
+// Atomic saves (write tmp + rename) must not drop covered files from the
+// list, and the replacement file must still reach live-reload through the
+// covering root instead of a re-registered per-file watch.
+func TestAtomicSave_UnderRootKeepsLiveReload(t *testing.T) {
+	forceRootWatch(t)
+	ctx, cancel := donegroup.WithCancel(context.Background())
+	defer cancel()
+
+	s := NewState(ctx)
+	t.Cleanup(s.CloseAllSubscribers)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "foo.md")
+	if err := os.WriteFile(target, []byte("# init"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := s.AddPattern(filepath.Join(dir, "**", "*.md"), DefaultGroup)
+	if err != nil {
+		t.Fatalf("AddPattern returned error: %v", err)
+	}
+	id := entries[0].ID
+
+	tmp := target + ".tmp"
+	if err := os.WriteFile(tmp, []byte("# atomic"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		t.Fatal(err)
+	}
+
+	ch := s.Subscribe()
+	defer s.Unsubscribe(ch)
+	waitForFileChanged(t, ch)
+
+	if s.FindFile(id, DefaultGroup) == nil {
+		t.Fatalf("file %q was dropped from the list after atomic save", target)
+	}
+}
+
+// waitForFileChanged expects one file-changed event on ch within a few
+// seconds, ignoring other event types.
+func waitForFileChanged(t *testing.T, ch chan sseEvent) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case e := <-ch:
+			if e.Name == eventFileChanged {
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for a file-changed event")
+		}
+	}
+}
+
 func TestTranslateEventPaths(t *testing.T) {
 	canonicalDir := filepath.FromSlash("/private/var/foo/docs")
 	originalDir := filepath.FromSlash("/var/foo/docs")
@@ -2727,7 +3127,9 @@ func TestWalkSymlinkTree_ReportsUnresolvedEntries(t *testing.T) {
 }
 
 // A directory that stops resolving after the watch was set up must still have
-// its reference count released when the pattern is removed.
+// its reference count released when the pattern is removed. Under the root
+// model the symlinked directory keeps a path alias (refcounted in dirAliases)
+// instead of a per-directory watch, and teardown must release that too.
 func TestRemovePattern_ReleasesWatchForUnresolvedDir(t *testing.T) {
 	ctx, cancel := donegroup.WithCancel(context.Background())
 	defer cancel()
@@ -2749,12 +3151,25 @@ func TestRemovePattern_ReleasesWatchForUnresolvedDir(t *testing.T) {
 		t.Fatalf("AddPattern returned error: %v", err)
 	}
 
-	s.mu.RLock()
-	_, watched := s.watchedDirs[linkDir]
-	s.mu.RUnlock()
-	if !watched {
-		t.Fatalf("watchedDirs does not contain %q after AddPattern", linkDir)
+	assertDirBookkeeping := func(want bool, when string) {
+		t.Helper()
+		if !watchRootsEnabled {
+			s.mu.RLock()
+			_, watched := s.watchedDirs[linkDir]
+			s.mu.RUnlock()
+			if watched != want {
+				t.Fatalf("watchedDirs contains %q = %v %s, want %v", linkDir, watched, when, want)
+			}
+			return
+		}
+		s.mu.RLock()
+		_, aliased := s.dirAliases[linkDir]
+		s.mu.RUnlock()
+		if aliased != want {
+			t.Fatalf("dirAliases contains %q = %v %s, want %v", linkDir, aliased, when, want)
+		}
 	}
+	assertDirBookkeeping(true, "after AddPattern")
 
 	// The symlink now dangles, so the walk can no longer classify it.
 	if err := os.RemoveAll(realDir); err != nil {
@@ -2765,12 +3180,7 @@ func TestRemovePattern_ReleasesWatchForUnresolvedDir(t *testing.T) {
 		t.Fatal("RemovePattern returned false")
 	}
 
-	s.mu.RLock()
-	count, stillWatched := s.watchedDirs[linkDir]
-	s.mu.RUnlock()
-	if stillWatched {
-		t.Errorf("watchedDirs[%q] = %d after RemovePattern, want the entry to be gone", linkDir, count)
-	}
+	assertDirBookkeeping(false, "after RemovePattern")
 }
 
 // A failed initial expansion must not leave the pattern registered, because
@@ -2976,6 +3386,12 @@ func TestUnregisterPathAlias_KeepsCanonicalWhileAliasesRemain(t *testing.T) {
 // may reach the directory-watch bookkeeping. A dangling file symlink is
 // unresolvable but was never a watched directory, so it must be skipped.
 func TestWalkDirsForPattern_SkipsUnresolvableNonDirEntries(t *testing.T) {
+	// This test exercises the per-directory walk itself, which only runs when
+	// the root model is off.
+	old := watchRootsEnabled
+	watchRootsEnabled = false
+	t.Cleanup(func() { watchRootsEnabled = old })
+
 	ctx, cancel := donegroup.WithCancel(context.Background())
 	defer cancel()
 

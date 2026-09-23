@@ -259,6 +259,24 @@ type State struct {
 	watchedFiles     map[string]int
 	fileWatchTargets map[string]int
 
+	// roots and rootTargets mirror watchedDirs and watchTargets for recursive
+	// root watches (one AddRecursive per pattern base, instead of one watch
+	// per directory and file). roots counts the base as spelled, rootTargets
+	// its canonical form. retainedRoots holds canonical targets whose pattern
+	// went away but whose stream must stay alive because tracked files below
+	// them carry no watch of their own. dirAliases refcounts the symlinked
+	// directories whose path aliases keep event translation working under the
+	// root model.
+	roots         map[string]int
+	rootTargets   map[string]int
+	retainedRoots map[string]bool
+	dirAliases    map[string]int
+
+	// rootWatch snapshots watchRootsEnabled at construction, so the watch
+	// loop reads an immutable value instead of racing with tests that flip
+	// the global.
+	rootWatch bool
+
 	fileChangeDebounce time.Duration
 	fileChangeTimers   map[string]*time.Timer
 
@@ -287,6 +305,11 @@ func NewState(ctx context.Context) *State {
 		aliasReverse:       make(map[string]string),
 		watchedFiles:       make(map[string]int),
 		fileWatchTargets:   make(map[string]int),
+		roots:              make(map[string]int),
+		rootTargets:        make(map[string]int),
+		retainedRoots:      make(map[string]bool),
+		dirAliases:         make(map[string]int),
+		rootWatch:          watchRootsEnabled,
 		fileChangeDebounce: defaultFileChangeDebounce,
 		fileChangeTimers:   make(map[string]*time.Timer),
 	}
@@ -784,18 +807,24 @@ func (s *State) AddPatternWithRules(absPattern, groupName string, rules ignore.R
 		return nil, PatternStats{}, nil
 	}
 	if replaced != nil {
-		s.walkDirsForPattern(replaced, s.removeDirWatch)
+		s.releasePatternWatches(replaced)
 	}
+
+	// Register the watches before the expansion: files added below then see a
+	// covering root (or directory watch) in fileCovered and skip their
+	// per-file watch, instead of registering one each.
+	s.registerPatternWatches(gp)
 
 	matches, stats, err := expandPatternMatches(gp)
 	if err != nil {
 		s.rollbackPattern(gp, createdGroup)
+		s.releasePatternWatches(gp)
 		if replaced != nil {
 			// The old pattern lost its watches above; restore it intact.
 			s.mu.Lock()
 			s.patterns = append(s.patterns, replaced)
 			s.mu.Unlock()
-			s.watchDirsForPattern(replaced)
+			s.registerPatternWatches(replaced)
 		}
 		return nil, PatternStats{}, fmt.Errorf("glob expansion failed: %w", err)
 	}
@@ -814,8 +843,6 @@ func (s *State) AddPatternWithRules(absPattern, groupName string, rules ignore.R
 		}
 		entries = append(entries, entry)
 	}
-
-	s.watchDirsForPattern(gp)
 
 	stats.Matched = len(entries)
 	return entries, stats, nil
@@ -927,7 +954,7 @@ func (s *State) RemovePattern(absPattern, groupName string) bool {
 		return false
 	}
 
-	s.walkDirsForPattern(removed, s.removeDirWatch)
+	s.releasePatternWatches(removed)
 
 	slog.Info("pattern removed", "pattern", absPattern, "group", groupName)
 	s.mu.Lock()
@@ -1116,7 +1143,7 @@ func (s *State) walkDirsForPattern(gp *GlobPattern, fn func(string)) {
 	// would only produce a failed watch and a misleading warning on the add
 	// path.
 	for _, path := range stats.Unresolved {
-		if s.isWatchedDir(path) {
+		if s.isDirectlyWatchedDir(path) {
 			fn(path)
 		}
 	}
@@ -1152,10 +1179,14 @@ func (s *State) removeFileWatch(absPath string) {
 	}
 	delete(s.fileWatchTargets, target)
 	if s.watcher != nil {
-		if err := s.watcher.Remove(target); err != nil {
+		// ErrNotAdded is normal here: a covered file was never registered
+		// individually, and a failed registration is retried later.
+		if err := s.watcher.Remove(target); err != nil && !errors.Is(err, fswatcher.ErrNotAdded) {
 			slog.Warn("failed to unwatch file", "path", absPath, "target", target, "error", err)
 		}
 	}
+	// The removal may have been the last tracked file below a retained root.
+	s.sweepRetainedRootsLocked()
 }
 
 func (s *State) removeDirWatch(dir string) {
@@ -1184,7 +1215,9 @@ func (s *State) removeDirWatch(dir string) {
 	}
 	delete(s.watchTargets, target)
 	if s.watcher != nil {
-		if err := s.watcher.Remove(target); err != nil {
+		// ErrNotAdded is normal: a directory covered by a root was never
+		// registered individually.
+		if err := s.watcher.Remove(target); err != nil && !errors.Is(err, fswatcher.ErrNotAdded) {
 			slog.Warn("failed to remove directory watch", "dir", dir, "target", target, "error", err)
 		}
 	}
@@ -1214,11 +1247,28 @@ func (s *State) watchLoop() {
 					// entry (ErrAlreadyAdded for a still-live watch).
 					if event.Op.Has(fswatcher.Remove) || event.Op.Has(fswatcher.Rename) {
 						time.AfterFunc(100*time.Millisecond, func() {
-							if _, statErr := os.Stat(eventPath); errors.Is(statErr, os.ErrNotExist) {
+							fi, statErr := os.Stat(eventPath)
+							if errors.Is(statErr, os.ErrNotExist) {
 								slog.Info("file deleted, removing from list", "path", eventPath)
 								for _, ref := range refs {
 									s.RemoveFile(ref.ID, ref.Group)
 								}
+								return
+							}
+							if statErr == nil && fi.IsDir() && s.rootCovers(eventPath) {
+								// The path is now a directory inside a watched
+								// tree (a populated directory was renamed in):
+								// the watch reported only the directory, so
+								// scan what it brought along.
+								s.handleCreateForGlobs(eventPath)
+								return
+							}
+							if s.fileCovered(eventPath) {
+								// The covering watch tracks paths, not inodes:
+								// the replacement file is still watched, and
+								// re-registering it on every atomic save would
+								// pile up duplicate registrations.
+								s.scheduleFileChanged(eventPath)
 								return
 							}
 							if err := s.watcher.Add(eventPath, watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
@@ -1231,8 +1281,11 @@ func (s *State) watchLoop() {
 					}
 				}
 				if event.Op.Has(fswatcher.Rename) || event.Op.Has(fswatcher.Remove) {
-					if s.isWatchedDir(eventPath) {
+					if s.isDirectlyWatchedDir(eventPath) || s.dirMoveUnderRoot(eventPath, refs) {
 						s.handleDirMove(eventPath)
+					}
+					if s.isRootPath(eventPath) {
+						s.noteRootLoss(eventPath)
 					}
 				}
 				if event.Op.Has(fswatcher.Create) {
@@ -1431,7 +1484,11 @@ func (s *State) findRefsByPathPrefix(dirPath string) []fileRef {
 	return refs
 }
 
-func (s *State) isWatchedDir(path string) bool {
+// isDirectlyWatchedDir reports whether path has a per-directory watch entry.
+// Under the root model directories inside a recursive pattern have no such
+// entry (the root covers them), so this answers "is directly watched", not
+// "is inside the watched set".
+func (s *State) isDirectlyWatchedDir(path string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	_, ok := s.watchedDirs[path]
@@ -1460,10 +1517,6 @@ func (s *State) sendEvent(e sseEvent) {
 	if e.Name == eventUpdate {
 		s.markDirty()
 	}
-}
-
-func (s *State) watchDirsForPattern(gp *GlobPattern) {
-	s.walkDirsForPattern(gp, s.addDirWatch)
 }
 
 // rollbackPattern undoes what AddPattern registers before its initial
@@ -1514,12 +1567,11 @@ func (s *State) addFileWatch(absPath, canonical string) {
 		s.registerPathAlias(absPath, canonical)
 		return
 	}
-	if s.watcher != nil {
+	if s.watcher != nil && !s.fileCoveredLocked(target) {
 		if err := s.watcher.Add(target, watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
-			delete(s.watchedFiles, absPath)
-			delete(s.fileWatchTargets, target)
+			// Keep the counts: a rollback here would desync removeFileWatch's
+			// bookkeeping, and registration failures are reconciled by retry.
 			slog.Warn("failed to watch file", "path", absPath, "target", target, "error", err)
-			return
 		}
 	}
 	s.registerPathAlias(absPath, canonical)
@@ -1550,12 +1602,13 @@ func (s *State) addDirWatch(dir string) {
 		s.registerPathAlias(dir, canonical)
 		return
 	}
-	if s.watcher != nil {
+	// A directory below a live root is already covered by the root's stream;
+	// keep the bookkeeping but skip the second registration.
+	if s.watcher != nil && !s.rootCoversLocked(target) {
 		if err := s.watcher.Add(target, watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
-			delete(s.watchedDirs, dir)
-			delete(s.watchTargets, target)
+			// Keep the counts: a rollback here would desync removeDirWatch's
+			// bookkeeping, and registration failures are reconciled by retry.
 			slog.Warn("failed to watch directory", "path", dir, "target", target, "error", err)
-			return
 		}
 	}
 	s.registerPathAlias(dir, canonical)
@@ -1588,11 +1641,19 @@ func (s *State) handleCreateForGlobs(path string) {
 		}
 		// Prune subtrees no covering pattern admits, so a created .git or
 		// vendor directory is neither scanned nor watched.
-		if _, err := walkSymlinkTree(path, func(dir string) {
+		visitDir := func(dir string) {
 			for range watchCount {
 				s.addDirWatch(dir)
 			}
-		}, func(file string) {
+		}
+		if s.hasRoots() {
+			// A root watch already covers the subtree, so no registration is
+			// needed (or wanted: it would multiply watches). The scan still
+			// has to pick up the files a populated directory brought along,
+			// and keeps path aliases fresh for symlinked directories inside.
+			visitDir = s.retainDirAlias
+		}
+		if _, err := walkSymlinkTree(path, visitDir, func(file string) {
 			s.matchAndAddFile(file, patterns)
 		}, pruneForPatterns(patterns)); err != nil {
 			slog.Warn("failed to scan created directory", "path", path, "error", err)
