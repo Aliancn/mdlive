@@ -58,16 +58,6 @@ Convenience gaps in the current file list design.
   request the next page from the UI.
 - [ ] **Keyboard navigation of results** (arrow keys + Enter).
 
-## Errors and feedback
-
-- [ ] **Toast component.** `moveFile` failure uses `window.alert`
-  (`Sidebar.tsx`); replace with an inline toast, and reuse it elsewhere.
-- [ ] **Retry button on file-load failure.** "Failed to load file." is a
-  dead end (`MarkdownViewer.tsx`).
-- [ ] **Initial groups fetch failure shows an error state with retry.**
-  Today the failure is swallowed (`App.tsx` initial fetch) and the user
-  sees an empty group instead of an error.
-
 ## Groups
 
 - [ ] **Create / rename groups from the UI.** Requires new server APIs;
