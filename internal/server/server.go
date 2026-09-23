@@ -1318,7 +1318,7 @@ func (s *State) watchLoop() {
 							if canonical := resolvePathAlias(eventPath); canonical != "" {
 								target = canonical
 							}
-							if err := s.watcher.Add(eventPath, watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
+							if err := s.watcher.Add(fileWatchPath(target), watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
 								slog.Warn("failed to re-watch file", "path", eventPath, "error", err)
 								s.recordWatchFailure(watchKindFile, target, err)
 								return
@@ -1624,7 +1624,7 @@ func (s *State) addFileWatch(absPath, canonical string) {
 		return
 	}
 	if s.watcher != nil && !s.fileCoveredLocked(target) {
-		if err := s.watcher.Add(target, watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
+		if err := s.watcher.Add(fileWatchPath(target), watchOps); err != nil && !errors.Is(err, fswatcher.ErrAlreadyAdded) {
 			// Keep the counts: a rollback here would desync removeFileWatch's
 			// bookkeeping, and registration failures are reconciled by retry.
 			slog.Warn("failed to watch file", "path", absPath, "target", target, "error", err)

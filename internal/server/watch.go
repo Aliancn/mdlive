@@ -876,9 +876,12 @@ func (s *State) rewatchTarget(r watchRetry) {
 		return
 	}
 	var err error
-	if r.kind == watchKindRoot {
+	switch r.kind {
+	case watchKindRoot:
 		err = s.watcher.AddRecursive(r.target, watchOps)
-	} else {
+	case watchKindFile:
+		err = s.watcher.Add(fileWatchPath(r.target), watchOps)
+	default:
 		err = s.watcher.Add(r.target, watchOps)
 	}
 	if err == nil || errors.Is(err, fswatcher.ErrAlreadyAdded) {
