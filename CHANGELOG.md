@@ -4,6 +4,14 @@ All notable changes to this project are documented here. This file is
 maintained by [tagpr](https://github.com/Songmu/tagpr) from Conventional
 Commits on `main`.
 
+## [v0.1.4](https://github.com/Aliancn/mdlive/compare/v0.1.3...v0.1.4) - 2026-09-23
+
+### Other Changes
+- feat: sidebar usability improvements by @Aliancn in https://github.com/Aliancn/mdlive/pull/12
+- feat: make code blocks follow the theme by @Aliancn in https://github.com/Aliancn/mdlive/pull/13
+- feat: error feedback (toast, retry buttons) by @Aliancn in https://github.com/Aliancn/mdlive/pull/14
+- feat: sidebar batch 2 — recently viewed, file counts, add-files button by @Aliancn in https://github.com/Aliancn/mdlive/pull/15
+
 ## [v0.1.3](https://github.com/Aliancn/mdlive/compare/v0.1.2...v0.1.3) - 2026-09-23
 
 ### Other Changes
