@@ -181,6 +181,7 @@ export function Sidebar({
 
   const searchOpen = searchQuery != null;
   const isSearching = searchQuery != null && searchQuery.length > 0;
+  const asideRef = useRef<HTMLElement>(null);
 
   const files = useMemo(() => {
     if (!searchQuery) return allFiles;
@@ -195,6 +196,20 @@ export function Sidebar({
       searchInputRef.current?.focus();
     }
   }, [searchOpen]);
+
+  // Navigation via search results or in-document links can land on a file
+  // far off-screen. Reveal the active row by scrolling it into view; wait a
+  // frame so TreeView's own expansion of the row's collapsed ancestors
+  // (triggered by the same change) has rendered first.
+  useEffect(() => {
+    if (activeFileId == null) return;
+    const frame = requestAnimationFrame(() => {
+      asideRef.current
+        ?.querySelector('[aria-current="page"]')
+        ?.scrollIntoView?.({ block: "nearest" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeFileId]);
 
   const [width, setWidth] = useState(getInitialWidth);
   const resizeDragging = useRef(false);
@@ -328,6 +343,7 @@ export function Sidebar({
 
   return (
     <aside
+      ref={asideRef}
       className="relative bg-gh-bg-sidebar border-r border-gh-border flex flex-col overflow-y-auto overscroll-contain shrink-0"
       style={{ width }}
     >

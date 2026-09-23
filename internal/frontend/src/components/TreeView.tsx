@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FileEntry, Group } from "../hooks/useApi";
 import { buildTree, type TreeNode } from "../utils/buildTree";
 import { buildFileUrl } from "../utils/groups";
@@ -7,6 +7,20 @@ import { FileContextMenu } from "./FileContextMenu";
 import { FileIcon } from "./FileIcon";
 
 const COLLAPSED_STORAGE_KEY = "ml-sidebar-tree-collapsed";
+
+// Returns the fullPath of every directory node on the way down to the file,
+// or null when the file is not in the tree.
+function ancestorPathsOf(node: TreeNode, fileId: string, ancestors: string[] = []): string[] | null {
+  if (node.file != null) {
+    return node.file.id === fileId ? ancestors : null;
+  }
+  const next = node.fullPath ? [...ancestors, node.fullPath] : ancestors;
+  for (const child of node.children) {
+    const found = ancestorPathsOf(child, fileId, next);
+    if (found != null) return found;
+  }
+  return null;
+}
 
 function getInitialCollapsed(group: string): Set<string> {
   try {
@@ -87,6 +101,28 @@ export function TreeView({
       return next;
     });
   }, []);
+
+  // When the active file changes (deep link, search result, in-document
+  // link), expand its collapsed ancestors so the row is visible — the
+  // sidebar scrolls it into view. Only navigation re-expands: later tree
+  // changes leave whatever the user collapsed alone.
+  const prevActiveFileId = useRef<string | null>(null);
+  useEffect(() => {
+    if (prevActiveFileId.current === activeFileId) return;
+    prevActiveFileId.current = activeFileId;
+    if (activeFileId == null) return;
+    const ancestors = ancestorPathsOf(tree, activeFileId);
+    if (ancestors == null) return;
+    setCollapsedPaths((prev) => {
+      const hidden = ancestors.filter((p) => prev.has(p));
+      if (hidden.length === 0) return prev;
+      const next = new Set(prev);
+      for (const path of hidden) {
+        next.delete(path);
+      }
+      return next;
+    });
+  }, [activeFileId, tree]);
 
   return (
     <>
