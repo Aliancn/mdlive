@@ -4,6 +4,11 @@ All notable changes to this project are documented here. This file is
 maintained by [tagpr](https://github.com/Songmu/tagpr) from Conventional
 Commits on `main`.
 
+## [v0.1.3](https://github.com/Aliancn/mdlive/compare/v0.1.2...v0.1.3) - 2026-09-23
+
+### Other Changes
+- fix(cli): round-trip the group in ml --reload by @Aliancn in https://github.com/Aliancn/mdlive/pull/9
+
 ## [v0.1.2](https://github.com/Aliancn/mdlive/compare/v0.1.1...v0.1.2) - 2026-09-23
 
 ### Other Changes
