@@ -10,7 +10,11 @@ const COLLAPSED_STORAGE_KEY = "ml-sidebar-tree-collapsed";
 
 // Returns the fullPath of every directory node on the way down to the file,
 // or null when the file is not in the tree.
-function ancestorPathsOf(node: TreeNode, fileId: string, ancestors: string[] = []): string[] | null {
+function ancestorPathsOf(
+  node: TreeNode,
+  fileId: string,
+  ancestors: string[] = [],
+): string[] | null {
   if (node.file != null) {
     return node.file.id === fileId ? ancestors : null;
   }
@@ -21,6 +25,20 @@ function ancestorPathsOf(node: TreeNode, fileId: string, ancestors: string[] = [
   }
   return null;
 }
+
+// Collects the fullPath of every directory node in the tree.
+function collectDirPaths(node: TreeNode, paths: string[] = []): string[] {
+  for (const child of node.children) {
+    if (child.file == null) {
+      paths.push(child.fullPath);
+      collectDirPaths(child, paths);
+    }
+  }
+  return paths;
+}
+
+const TREE_CONTROL_CLASS =
+  "flex items-center justify-center bg-transparent border border-gh-border rounded-md p-1 cursor-pointer text-gh-text-secondary hover:bg-gh-bg-hover hover:text-gh-text transition-colors duration-150";
 
 function getInitialCollapsed(group: string): Set<string> {
   try {
@@ -124,8 +142,54 @@ export function TreeView({
     });
   }, [activeFileId, tree]);
 
+  const allDirPaths = useMemo(() => collectDirPaths(tree), [tree]);
+
   return (
     <>
+      {allDirPaths.length > 0 && (
+        <div className="flex justify-end gap-1 px-2 pt-1">
+          <button
+            type="button"
+            className={TREE_CONTROL_CLASS}
+            onClick={() => setCollapsedPaths(new Set())}
+            aria-label="Expand all"
+            title="Expand all"
+          >
+            <svg
+              className="size-3.5"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 3.5 8 8l5-4.5" />
+              <path d="M3 8.5 8 13l5-4.5" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className={TREE_CONTROL_CLASS}
+            onClick={() => setCollapsedPaths(new Set(allDirPaths))}
+            aria-label="Collapse all"
+            title="Collapse all"
+          >
+            <svg
+              className="size-3.5"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 3l5 5-5 5" />
+              <path d="M8 3l5 5-5 5" />
+            </svg>
+          </button>
+        </div>
+      )}
       {tree.children.map((node) => (
         <TreeNodeItem
           key={node.fullPath}
