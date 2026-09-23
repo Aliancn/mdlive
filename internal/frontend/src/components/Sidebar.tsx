@@ -15,7 +15,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { FileEntry, Group, SearchResult } from "../hooks/useApi";
-import { removeFile, moveFile } from "../hooks/useApi";
+import { removeFile, moveFile, uploadFile } from "../hooks/useApi";
 import { buildFileUrl } from "../utils/groups";
 import { isPlainLeftClick } from "../utils/linkClick";
 import { escapeRegExp } from "../utils/regex";
@@ -32,6 +32,8 @@ const STORAGE_KEY = "ml-sidebar-width";
 // With a short file list the whole list is on screen; the recently viewed
 // section only pays off once the list is long enough to hunt through.
 const RECENT_MIN_GROUP_FILES = 5;
+// Same limit as the server's upload endpoint and drag-and-drop.
+const MAX_UPLOAD_SIZE = 10 * 1024 * 1024;
 
 function getInitialWidth(): number {
   const stored = localStorage.getItem(STORAGE_KEY);
@@ -360,6 +362,30 @@ export function Sidebar({
 
   const showToast = useToast();
 
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFilesPicked = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const picked = e.target.files;
+      // Reset so picking the same file again fires another change event.
+      e.target.value = "";
+      if (!picked || picked.length === 0) return;
+      for (const file of Array.from(picked)) {
+        if (file.size > MAX_UPLOAD_SIZE) {
+          showToast(`Skipped ${file.name}: larger than 10MB`);
+          continue;
+        }
+        try {
+          const content = await file.text();
+          await uploadFile(file.name, content, activeGroup);
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : `Failed to upload ${file.name}`);
+        }
+      }
+    },
+    [activeGroup, showToast],
+  );
+
   const handleMoveToGroup = useCallback(
     async (id: string, group: string) => {
       setMenuOpenId(null);
@@ -404,8 +430,8 @@ export function Sidebar({
       className="relative bg-gh-bg-sidebar border-r border-gh-border flex flex-col overflow-y-auto overscroll-contain shrink-0"
       style={{ width }}
     >
-      {searchOpen && (
-        <div className="px-2 pt-2 pb-1">
+      <div className={`flex items-center gap-1 px-2 pt-2 pb-1 ${searchOpen ? "" : "justify-end"}`}>
+        {searchOpen && (
           <input
             ref={searchInputRef}
             type="text"
@@ -415,10 +441,34 @@ export function Sidebar({
               if (e.key === "Escape") onSearchQueryChange(null);
             }}
             placeholder="Search files..."
-            className="w-full px-2 py-1.5 text-sm bg-gh-bg border border-gh-border rounded-md text-gh-text placeholder:text-gh-text-secondary outline-none focus:border-gh-accent"
+            className="min-w-0 flex-1 px-2 py-1.5 text-sm bg-gh-bg border border-gh-border rounded-md text-gh-text placeholder:text-gh-text-secondary outline-none focus:border-gh-accent"
           />
-        </div>
-      )}
+        )}
+        <button
+          type="button"
+          className="shrink-0 bg-transparent border border-gh-border rounded-md p-1.5 text-gh-text-secondary cursor-pointer transition-colors duration-150 hover:bg-gh-bg-hover"
+          onClick={() => fileInputRef.current?.click()}
+          aria-label="Add files"
+          title="Add files"
+        >
+          <svg
+            className="size-4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" d="M12 5v14M5 12h14" />
+          </svg>
+        </button>
+      </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFilesPicked}
+      />
       <nav className="flex flex-col pb-1">
         {recentFiles.length > 0 && (
           <>

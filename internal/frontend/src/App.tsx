@@ -412,7 +412,7 @@ export function App() {
   // few files ago does not require hunting through the list.
   useEffect(() => {
     if (activeFileId == null) return;
-    setRecentByGroup((prev) => pushRecentFile(prev, activeGroup, activeFileId));
+    setRecentByGroup((prev) => pushRecentFile(prev, activeGroup, activeFileId) ?? prev);
   }, [activeFileId, activeGroup]);
 
   useEffect(() => {
