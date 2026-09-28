@@ -3,6 +3,10 @@ COMMIT = $(shell git rev-parse --short HEAD)
 
 BUILD_LDFLAGS = "-s -w -X $(PKG)/version.Revision=$(COMMIT)"
 
+# go install puts tools in $(go env GOPATH)/bin; resolve gostyle there so
+# `make lint` does not depend on ~/go/bin being on PATH.
+GOSTYLE = $(shell go env GOPATH)/bin/gostyle
+
 default: test
 
 ci: depsdev generate test
@@ -26,7 +30,7 @@ screenshot: build
 lint:
 	cd internal/frontend && pnpm install && pnpm run fmt:check && pnpm run lint
 	golangci-lint run ./...
-	go vet -vettool=`which gostyle` -gostyle.config=$(PWD)/.gostyle.yml ./...
+	go vet -vettool=$(GOSTYLE) -gostyle.config=$(PWD)/.gostyle.yml ./...
 
 fmt:
 	cd internal/frontend && pnpm install && pnpm run fmt
