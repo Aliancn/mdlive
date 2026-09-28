@@ -62,9 +62,6 @@ Convenience gaps in the current file list design.
 
 - [ ] **Content cache.** Every file switch refetches content; an in-memory
   LRU keyed by `(fileId, revision)` makes back/forward instant.
-- [ ] **Shiki highlight cache.** `CodeBlock` re-highlights on every mount;
-  cache by `(lang, code)`. Also pre-check `bundledLanguageInfo` instead of
-  trying and falling back to `text`.
 - [ ] **Refactor the render-time state adjustment in `App.tsx`** (the
   `prevGroups` / `prevActiveGroup` pattern) into explicit derivation —
   fragile as branches grow.
