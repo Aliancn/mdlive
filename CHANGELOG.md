@@ -4,6 +4,8 @@ All notable changes to this project are documented here. This file is
 maintained by [tagpr](https://github.com/Songmu/tagpr) from Conventional
 Commits on `main`.
 
+## [v0.2.1](https://github.com/Aliancn/mdlive/compare/v0.2.0...v0.2.1) - 2026-09-28
+
 ## [v0.2.0](https://github.com/Aliancn/mdlive/compare/v0.1.3...v0.2.0) - 2026-09-28
 
 ### Other Changes
