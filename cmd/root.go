@@ -92,146 +92,94 @@ type patternSpec struct {
 
 var rootCmd = &cobra.Command{
 	Use:   "ml [flags] [FILE|DIR ...]",
-	Short: "ml is a Markdown viewer that opens .md files in a browser.",
-	Long: `ml is a Markdown viewer that opens .md files in a browser with live-reload.
+	Short: "ml is a Markdown live viewer: it serves Markdown files in a browser and refreshes the page on save.",
+	Long: `ml is a Markdown live viewer: it serves Markdown files in a browser and
+refreshes the page the moment a file is saved.
 
-It runs in the background, serving Markdown files using a built-in React SPA,
-and automatically refreshes the browser when files are saved.
+There are no subcommands. Every invocation performs exactly one task,
+selected by flags; FILE, DIR, and glob arguments select which files it
+applies to. One server runs per port (default 6275), in the background;
+later invocations attach to it and add their files to the same session.
 
-Examples:
-  ml README.md                          Open a single file
-  ml README.md CHANGELOG.md docs/*.md   Open multiple files
-  ml spec.md --target design            Open in a named group
-  ml draft.md --port 6276               Use a different port
-  cat notes.md | ml                     Read Markdown from stdin
-  cmd | ml --target output              Pipe command output into a group
+QUICK REFERENCE
 
-Single Server, Multiple Files:
-  By default, ml runs a single server on port 6275.
-  If a ml server is already running on the same port, subsequent ml
-  invocations add files to the existing session instead of starting a new one.
+  ml README.md docs/*.md          open files (starts or attaches to a server)
+  ml spec.md -t design            open into a named group (serves at /design)
+  cat notes.md | ml               view piped Markdown
+  ml -w 'docs/**/*.md'            watch a tree; new files appear automatically
+  ml --reload                     re-apply .mlignore/--exclude rules
+  ml --unwatch 'docs/**/*.md'     stop watching a pattern
+  ml --close README.md            remove files from the sidebar
+  ml --status                     list servers, groups, and watcher health
+  ml --shutdown / --restart       stop or restart (session is preserved)
+  ml --prune [--prune-backups]    delete leftovers of dead servers
 
-  $ ml README.md          # Starts a ml server in the background
-  $ ml CHANGELOG.md       # Adds the file to the running ml server
+OUTPUT
 
-  To run a completely separate session, use a different port:
+  stdout is machine-readable: the server URL plus one deeplink per file
+  (elided past 10 files; --verbose lists all), or one JSON document
+  with --json. Human-readable summaries go to stderr prefixed "ml:".
 
-  $ ml draft.md -p 6276
+OPENING FILES
 
-Groups:
-  Files can be organized into named groups using the --target (-t) flag.
-  Each group gets its own URL path (e.g., http://localhost:6275/design)
-  and its own sidebar in the browser.
+  ml README.md                          One file
+  ml README.md CHANGELOG.md docs/*.md   Several files (globs expand once)
+  ml docs/                              Every .md in docs/ (add -R to recurse)
+  cat notes.md | ml                     Markdown from stdin (also: cmd | ml)
 
-  $ ml spec.md --target design      # Opens at /design
-  $ ml api.md --target design       # Adds to the "design" group
-  $ ml notes.md --target notes      # Opens at /notes
+GROUPS
 
-  If no --target is specified, files are added to the "default" group.
+  Groups split the sidebar into named tabs, each with its own URL path.
+  Without --target, files go to the "default" group at /.
 
-Starting and Stopping:
-  ml runs in the background by default. The command returns
-  immediately, leaving the shell free for other work.
+  ml spec.md -t design      Opens at http://localhost:6275/design
+  ml api.md -t design       Adds to the same group
+  ml draft.md -p 6276       A separate session on another port
 
-  $ ml README.md            # Starts ml in the background
-  $ ml --status             # Shows all running ml servers
-  $ ml --shutdown           # Shuts it down
-  $ ml --restart            # Restarts it (preserving session)
+WATCHING
 
-  Use --foreground to keep the ml server in the foreground.
+  --watch (-w) registers directory and glob arguments as watch
+  patterns: matching files open now, files created later appear
+  automatically, and every change reloads in the browser.
 
-Session Restore:
-  ml automatically saves session state. When starting a new server,
-  the previous session is restored and merged with any specified files.
+  ml -w '**/*.md'                    Watch every .md file
+  ml -w docs/                        Watch docs/*.md (-R: docs/**/*.md)
+  ml -wR docs/                       Short form of the above
+  ml --unwatch docs/                 Stop watching (sidebar files stay)
+  ml --unwatch -R docs/              Stop every pattern under docs/
 
-  $ ml README.md CHANGELOG.md    # Start with two files
-  $ ml --shutdown                # Shut down the server
-  $ ml                           # Restores README.md and CHANGELOG.md
-  $ ml TODO.md                   # Restores previous session + adds TODO.md
+  Without --watch, globs expand once and no new files are picked up.
 
-  Use --clear to remove a saved session.
+EXCLUDING FILES
 
-Live-Reload:
-  ml watches all opened files for changes using filesystem notifications.
-  When a file is saved, the browser automatically re-renders the content.
+  Discovery skips dot-prefixed paths by default (--include-hidden
+  turns that off). --exclude patterns (repeatable) and .mlignore lines
+  in the working directory narrow it further, using gitignore-style
+  syntax. Explicitly named files are never filtered. Rules affect new
+  discovery only; re-apply them to registered patterns with --reload.
 
-Supported Markdown Features:
-  - GitHub Flavored Markdown (tables, task lists, strikethrough, autolinks)
-  - Syntax-highlighted code blocks (via Shiki)
-  - Mermaid diagrams
-  - LaTeX math rendering (via KaTeX)
-  - GitHub Alerts (admonitions)
-  - Fullscreen zoom modal for images and Mermaid diagrams
-  - YAML frontmatter (displayed as a collapsible metadata block)
-  - MDX files (rendered as Markdown with import/export stripped and JSX tags escaped)
-  - Raw HTML
+  ml -R . --exclude 'vendor/**'
+  ml -w '**/*.md' --exclude '**/node_modules/**'
 
-Watch mode and glob patterns:
-  --watch (-w) turns on watch mode. Directory and glob positional
-  arguments are then registered as watch patterns; matching files are
-  opened and new files are picked up automatically. Combine with
-  --recursive (-R) to descend into subdirectories.
+SESSIONS
 
-  $ ml -w '**/*.md'                   Watch all .md files recursively
-  $ ml -w 'docs/**/*.md' -t docs      Watch docs/ tree in "docs" group
-  $ ml -w '*.md' 'docs/**/*.md'       Multiple patterns (positional)
-  $ ml -w docs/                       Watch docs/*.md
-  $ ml -w -R docs/                    Watch docs/**/*.md
-  $ ml -wR docs/                      Same (short-combined form)
-  $ ml --unwatch '**/*.md'            Stop watching a pattern
-  $ ml --unwatch docs/                Stop watching docs/*.md
-  $ ml --unwatch -R docs/             Stop watching all patterns under docs/
+  Sessions (files, groups, patterns) are saved on every change and
+  restored when a server starts again. --close removes individual
+  files; --clear discards the saved session; --restart picks up a new
+  binary while keeping the session.
 
-  Without --watch, globs are expanded once and a directory argument
-  opens the matching files without live-watching new additions.
+HOUSEKEEPING
 
-  $ ml -R docs/                       Open every .md under docs/ once
+  ml keeps a log and a saved session per port under
+  $XDG_STATE_HOME/ml/. Servers that exited without --shutdown leave
+  both behind; --prune removes the logs (and with --prune-backups, the
+  saved sessions) of ports that no longer answer.
 
-Excluding files:
-  By default, dot-prefixed files and directories (e.g. .git/) are not
-  opened or watched. --include-hidden turns that off. --exclude values
-  (repeatable) and the .mlignore file in the working directory filter
-  what directory and glob arguments discover; they use gitignore-style
-  syntax with rules anchored at the working directory.
-
-  $ ml -R . --exclude 'vendor/**'     Skip everything under vendor/
-  $ ml -w '**/*.md' --exclude '**/node_modules/**'
-  $ ml .git/README.md                 Explicit file arguments are never filtered
-  $ ml -w '**/*.md' --include-hidden  Watch hidden files too
-
-  A pattern without a separator (vendor) matches the base name at any
-  depth; a pattern with a separator (vendor/**, /docs/drafts/**) is
-  anchored at the working directory. '!'-prefixed lines re-include
-  files, and the last matching line wins. Files already shown in the
-  sidebar are never removed by excludes. Registered rules are shown by
-  --status and applied to already-registered patterns with ml --reload.
-
-Applying rule changes:
-  Editing .mlignore (or passing new --exclude flags) does not change
-  what is already in the sidebar until the rules are re-applied.
-
-  $ ml --reload                       Re-read .mlignore and re-apply rules
-  $ ml --reload --exclude 'new/**'    Also swap in new --exclude flags
-
-  Files the new rules no longer admit are removed from the sidebar;
-  explicitly named files are never removed. Patterns registered from
-  another directory are skipped (run ml --reload from there).
-
-Housekeeping:
-  ml keeps a rotating log and a saved session per port under
-  $XDG_STATE_HOME/ml/. Client-only commands (--status, --shutdown, ...)
-  do not create log files. Servers that exited without --shutdown leave
-  both behind; ml --prune removes the logs of ports that no longer
-  answer (kept saved sessions are only removed with --prune-backups).
-
-  $ ml --prune                        Remove stale log files
-  $ ml --prune --prune-backups        Also remove saved sessions (asks)
-
-WARNING: --bind with a non-loopback address:
-  Binding to a non-localhost address (e.g. 0.0.0.0) exposes ml to the
-  network without any authentication. Remote clients can read any file
+WARNING: --bind with a non-loopback address exposes ml to the network
+  without any authentication. Remote clients can read any file
   accessible by this user, browse the filesystem via glob patterns, and
-  shut down the server. A confirmation prompt is shown before starting.`,
+  shut down the server. A confirmation prompt is shown before starting
+  (skipped by --dangerously-allow-remote-access).`,
 	Args:    cobra.ArbitraryArgs,
 	RunE:    run,
 	Version: version.Version,
@@ -244,33 +192,33 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.Flags().StringVarP(&target, "target", "t", server.DefaultGroup, "Tab group name")
-	rootCmd.Flags().IntVarP(&port, "port", "p", 6275, "Server port")
-	rootCmd.Flags().StringVarP(&bind, "bind", "b", "localhost", "Bind address (e.g. localhost, 0.0.0.0)")
-	rootCmd.Flags().BoolVar(&open, "open", false, "Always open browser (even when adding to existing group)")
-	rootCmd.Flags().BoolVar(&noOpen, "no-open", false, "Do not open browser automatically")
+	rootCmd.Flags().StringVarP(&target, "target", "t", server.DefaultGroup, "Tab group for this invocation's files (a group maps to a URL path, e.g. -t design serves at /design)")
+	rootCmd.Flags().IntVarP(&port, "port", "p", 6275, "Server port; each port hosts one independent session")
+	rootCmd.Flags().StringVarP(&bind, "bind", "b", "localhost", "Address the server binds to (non-loopback addresses expose it without authentication)")
+	rootCmd.Flags().BoolVar(&open, "open", false, "Always open the browser, even when only attaching to a running server")
+	rootCmd.Flags().BoolVar(&noOpen, "no-open", false, "Never open the browser automatically")
 	rootCmd.MarkFlagsMutuallyExclusive("open", "no-open")
-	rootCmd.Flags().BoolVar(&shutdownServer, "shutdown", false, "Shut down the running ml server on the specified port")
-	rootCmd.Flags().BoolVar(&restartServer, "restart", false, "Restart the running ml server on the specified port")
+	rootCmd.Flags().BoolVar(&shutdownServer, "shutdown", false, "Shut down the running ml server on the target port")
+	rootCmd.Flags().BoolVar(&restartServer, "restart", false, "Restart the running ml server on the target port, preserving the session")
 	rootCmd.MarkFlagsMutuallyExclusive("shutdown", "restart")
 	rootCmd.Flags().StringVar(&restore, "restore", "", "Restore state from file (internal use)")
 	rootCmd.Flags().MarkHidden("restore") //nolint:errcheck
-	rootCmd.Flags().BoolVar(&foreground, "foreground", false, "Run ml server in foreground (do not background)")
-	rootCmd.Flags().BoolVar(&statusServer, "status", false, "Show status of all running ml servers")
-	rootCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Treat directory and glob arguments as watch patterns")
-	rootCmd.Flags().BoolVar(&unwatchMode, "unwatch", false, "Remove watched patterns for the given directory or glob arguments")
+	rootCmd.Flags().BoolVar(&foreground, "foreground", false, "Run the server in the foreground instead of backgrounding it")
+	rootCmd.Flags().BoolVar(&statusServer, "status", false, "Show status of every running ml server (groups, patterns, watcher health)")
+	rootCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Register directory and glob arguments as watch patterns; new matching files open automatically")
+	rootCmd.Flags().BoolVar(&unwatchMode, "unwatch", false, "Remove the watch patterns matching the given directory or glob arguments")
 	rootCmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "Recurse into subdirectories when a directory is given")
-	rootCmd.Flags().BoolVar(&closeFiles, "close", false, "Close files instead of opening them")
-	rootCmd.Flags().BoolVar(&clearBackup, "clear", false, "Clear saved session for the specified port")
+	rootCmd.Flags().BoolVar(&closeFiles, "close", false, "Close the given files instead of opening them")
+	rootCmd.Flags().BoolVar(&clearBackup, "clear", false, "Discard the saved session for the target port (restarts a running server empty)")
 	rootCmd.Flags().BoolVar(&pruneMode, "prune", false, "Remove log files of servers that are no longer running")
 	rootCmd.Flags().BoolVar(&pruneBackups, "prune-backups", false, "With --prune, also remove saved sessions of stopped servers (asks for confirmation)")
 	rootCmd.Flags().BoolVar(&reloadMode, "reload", false, "Re-apply .mlignore and --exclude rules to patterns registered from the current directory")
 	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "List every deeplink and print the full startup summary")
-	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output structured data as JSON to stdout")
-	rootCmd.Flags().BoolVar(&dangerouslyAllowRemoteAccess, "dangerously-allow-remote-access", false, "Allow remote access without authentication. Recommended only for trusted networks.")
-	rootCmd.Flags().StringArrayVar(&excludes, "exclude", nil, "Glob pattern of files to exclude from discovery (repeatable)")
-	rootCmd.Flags().BoolVar(&includeHidden, "include-hidden", false, "Include dot-prefixed hidden files and directories in discovery")
-	rootCmd.Flags().StringVar(&ignoreFile, "ignore-file", ".mlignore", "Name of the ignore file read from the working directory ('' disables)")
+	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output structured JSON on stdout instead of URLs (also with --status and --prune)")
+	rootCmd.Flags().BoolVar(&dangerouslyAllowRemoteAccess, "dangerously-allow-remote-access", false, "Skip the confirmation prompt for a non-loopback --bind (unauthenticated remote access; trusted networks only)")
+	rootCmd.Flags().StringArrayVar(&excludes, "exclude", nil, "Gitignore-style pattern of paths to skip during discovery (repeatable)")
+	rootCmd.Flags().BoolVar(&includeHidden, "include-hidden", false, "Also discover dot-prefixed files and directories")
+	rootCmd.Flags().StringVar(&ignoreFile, "ignore-file", ".mlignore", "Ignore file read from the working directory ('' disables)")
 }
 
 func run(cmd *cobra.Command, args []string) (retErr error) {
